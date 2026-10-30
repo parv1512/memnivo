@@ -1,0 +1,3 @@
+const fs=require('node:fs'),path=require('node:path'),ts=require('typescript');const printer=ts.createPrinter({newLine:ts.NewLineKind.LineFeed});
+function walk(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())walk(file);else if(/\.tsx?$/.test(file)&&!file.endsWith('.d.ts')){const source=ts.createSourceFile(file,fs.readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true,file.endsWith('.tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);if(source.parseDiagnostics.length)throw new Error('Fix syntax before formatting '+file);fs.writeFileSync(file,printer.printFile(source));}}}
+['src','tests','scripts'].forEach(walk);console.log('TypeScript sources formatted.');

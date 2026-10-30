@@ -1,0 +1,35 @@
+{
+  "name": "memnivo",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "dev": "node scripts/run.cjs --dev",
+    "build": "npm run typecheck && node scripts/build.cjs",
+    "start": "node scripts/run.cjs",
+    "worker": "node dist/server/scripts/worker.js",
+    "db:migrate": "node dist/server/scripts/migrate.js",
+    "vault": "node dist/server/scripts/vault.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "node scripts/check.cjs",
+    "test": "node scripts/build.cjs --server-only && node --test dist/server/tests/*.test.js",
+    "format": "node scripts/format.cjs",
+    "test:e2e": "node scripts/e2e.cjs",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.19",
+    "yaml": "2.9.0",
+    "lucide-react": "0.545.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-hook-form": "7.82.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.5",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "typescript": "5.9.3"
+  }
+}
