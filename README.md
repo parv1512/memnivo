@@ -75,6 +75,12 @@ AI_EMBEDDING_MODEL=an-installed-embedding-model
 
 Start/install models separately in Ollama. Restart Memnivo after changing environment values. Open **Settings → AI providers**, enable consent, save preferences, and test the connection. Use **Memory & retrieval → Re-index** to queue embeddings for existing items. Leave `AI_EMBEDDING_MODEL` blank to use lexical retrieval with generated answers only.
 
+### Project suggestions
+
+Project suggestions combine keyword matches with saved-link embeddings when a local Ollama connection and an embedding model are configured. Use **Settings → Memory & retrieval → Re-index** for older links, then reopen the project after indexing finishes. When Ollama is unavailable, project suggestions use keywords and relevant attachment history.
+
+Attaching a link records the project goal and the link as a useful example. Similar projects can give that link more weight. **Not relevant** hides a suggestion for the current project goal. This history is stored in the local database.
+
 With consent enabled, selected non-private source snippets and the current question can be sent to the provider. Casual greetings and unfinished-work questions run locally. Enrichment sends up to 18,000 characters per item; embedding sends bounded chunks. Private items are excluded from those requests. A vault connection alone does not enable provider access. Conversation history is kept locally and is not automatically sent to the provider. Treat the provider's retention policy as a separate choice.
 
 ## Connect a real Obsidian vault

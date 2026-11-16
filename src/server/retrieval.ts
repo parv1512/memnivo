@@ -1,8 +1,9 @@
 import { all, now, OWNER } from './db';
-import { listItems, getItem, createConversation, conversations, writeMessage, conversationMessages, AppError, projects, relations } from './store';
+import { listItems, getItem, createConversation, conversations, writeMessage, conversationMessages, AppError, projects, relations, projectFeedbackContext } from './store';
 import { aiProvider, providerStatus } from './ai';
 import { queryTokens, words, cosine, snippet, sourceDetails, savedContentBasis } from '../lib/core';
 import { asksForUnfinishedWork, unfinishedWork } from './unfinished';
+import { isLoopback } from './security';
 import type { Item, Citation, Project, ProjectSuggestions } from '../lib/types';
 export interface SearchOptions {
     scope?: 'all' | 'project' | 'item';
@@ -209,21 +210,128 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     return results.filter(r => !query.trim() || r.score > 0).sort((a, b) => b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt)).slice(0, opts.limit || 30);
 }
 
-export function suggestProjectLinks(project: Project): ProjectSuggestions {
-    const statedTopics = questionTopics(`${project.goal}\n${project.description}`);
-    const namedTopics = questionTopics(project.name);
+const PROJECT_ACTION_WORDS = new Set(['finding', 'explore', 'exploring', 'discover', 'discovering', 'identify', 'identifying']);
+function projectTopics(text: string): string[] {
+    return questionTopics(text).filter(word => !PROJECT_ACTION_WORDS.has(word));
+}
+
+type ProjectAttachment = { item_id: string; context: string };
+type MeaningMatch = { similarity: number; text: string };
+const projectVectorCache = new Map<string, number[]>();
+function isLocalOllama(baseUrl: string): boolean {
+    try {
+        return isLoopback(new URL(baseUrl).hostname);
+    }
+    catch {
+        return false;
+    }
+}
+async function projectMeaning(context: string, history: ProjectAttachment[], itemIds: Set<string>) {
+    const links = new Map<string, MeaningMatch>();
+    const contexts = new Map<string, number>();
+    const config = providerStatus();
+    if (config.provider !== 'ollama' || !config.embeddingModel || !isLocalOllama(config.baseUrl))
+        return { links, contexts };
+    const provider = aiProvider();
+    if (!provider)
+        return { links, contexts };
+
+    const model = `${config.provider}:${config.embeddingModel}`;
+    const chunks = all<{ item_id: string; embedding: string; text: string }>(
+        `SELECT c.item_id,c.embedding,c.text FROM embedding_chunks c JOIN items i ON i.id=c.item_id
+         WHERE i.user_id=? AND i.canonical_url IS NOT NULL AND i.status<>'archived'
+           AND i.sensitivity<>'private' AND c.embedding IS NOT NULL AND c.model=?
+         ORDER BY c.chunk_index,i.created_at DESC LIMIT 10000`, OWNER, model,
+    ).filter(chunk => itemIds.has(chunk.item_id));
+    const examples = [...new Set(history.map(example => example.context))].slice(0, 8);
+    if (!chunks.length && !examples.length)
+        return { links, contexts };
+
+    // Use the same text length limit for live and historical project goals.
+    const input = (text: string) => text.slice(0, 2000);
+    const key = (text: string) => JSON.stringify([config.baseUrl, model, input(text)]);
+    const texts = [...new Set([context, ...examples].map(input))];
+    const missing = texts.filter(text => !projectVectorCache.has(key(text)));
+    try {
+        if (missing.length) {
+            const vectors = await provider.embed(missing, AbortSignal.timeout(8000));
+            for (const [n, text] of missing.entries())
+                projectVectorCache.set(key(text), vectors[n]);
+        }
+        const vector = projectVectorCache.get(key(context))!;
+        for (const past of examples) {
+            const match = projectVectorCache.get(key(past));
+            if (match)
+                contexts.set(past, cosine(vector, match));
+        }
+        while (projectVectorCache.size > 64)
+            projectVectorCache.delete(projectVectorCache.keys().next().value!);
+
+        for (const chunk of chunks) {
+            const similarity = cosine(vector, JSON.parse(chunk.embedding));
+            if (similarity > (links.get(chunk.item_id)?.similarity ?? 0))
+                links.set(chunk.item_id, { similarity, text: chunk.text });
+        }
+    }
+    catch {
+        // Keyword matches and locally recorded attachments remain usable when Ollama is unavailable.
+    }
+    return { links, contexts };
+}
+
+function similarProjectContext(topics: string[], context: string, semantic?: number): number {
+    const pastTopics = new Set(projectTopics(context));
+    const shared = topics.filter(topic => pastTopics.has(topic)).length;
+    const lexical = shared / Math.max(1, topics.length + pastTopics.size - shared);
+    const meaning = semantic ?? 0;
+    return Math.max(shared >= 2 && lexical >= 0.45 ? lexical : 0, meaning >= 0.8 ? meaning : 0);
+}
+
+export async function suggestProjectLinks(project: Project): Promise<ProjectSuggestions> {
+    const statedTopics = projectTopics(`${project.goal}\n${project.description}`);
+    const namedTopics = projectTopics(project.name);
     const topics = statedTopics.length >= 2 ? statedTopics : [...new Set([...statedTopics, ...namedTopics])];
     if (!topics.length)
         return { needsContext: true, links: [] };
 
+    const context = projectFeedbackContext(project);
     const candidates = listItems().filter(item => item.url && item.status !== 'archived')
         .map(item => scoreFocusedItem(item, topics, ''));
-    // Connected links still set the coverage bar after they leave the suggestion list.
-    const bestCoverage = Math.max(0, ...candidates.map(candidate => candidate.matchedTopics.length));
+    if (!candidates.length)
+        return { needsContext: topics.length === 1, links: [] };
+
+    const dismissed = new Set(all<{ item_id: string }>(
+        "SELECT item_id FROM project_link_feedback WHERE project_id=? AND context=? AND signal='dismissed'", project.id, context,
+    ).map(row => row.item_id));
+    const itemIds = new Set(candidates.map(candidate => candidate.item.id));
+    const history = all<ProjectAttachment>(
+        `SELECT f.item_id,f.context FROM project_link_feedback f JOIN projects p ON p.id=f.project_id
+         WHERE p.user_id=? AND f.project_id<>? AND f.signal='attached'
+         ORDER BY f.created_at DESC LIMIT 1000`, OWNER, project.id,
+    ).filter(example => itemIds.has(example.item_id) && !dismissed.has(example.item_id));
+    const { links: similarLinks, contexts: similarContexts } = await projectMeaning(context, history, itemIds);
+    const learned = new Map<string, number>();
+    for (const past of history) {
+        const similarity = similarProjectContext(topics, past.context, similarContexts.get(past.context));
+        if (similarity > (learned.get(past.item_id) ?? 0))
+            learned.set(past.item_id, similarity);
+    }
+
+    // Keep the quality bar stable when a good match is attached or dismissed.
+    const bestCoverage = Math.max(...candidates.map(candidate => candidate.matchedTopics.length));
     const minimumMatches = Math.max(2, Math.min(3, topics.length), Math.ceil(bestCoverage * 0.75));
-    const links: ProjectSuggestions['links'] = [];
-    for (const { item, matchedTopics, exact } of candidates.sort(compareFocusedItems)) {
-        if (!item.url || item.projectId === project.id || (!exact && matchedTopics.length < minimumMatches))
+    const bestSimilarity = Math.max(0, ...Array.from(similarLinks.values(), match => match.similarity));
+    const meaningCutoff = Math.max(0.72, bestSimilarity - 0.18);
+    const ranked: { candidate: typeof candidates[number]; link: ProjectSuggestions['links'][number]; score: number }[] = [];
+    for (const candidate of candidates) {
+        const { item, matchedTopics, exact } = candidate;
+        if (!item.url || item.projectId === project.id || dismissed.has(item.id))
+            continue;
+
+        const match = similarLinks.get(item.id);
+        const semanticScore = match && match.similarity >= meaningCutoff ? match.similarity : 0;
+        const attachment = learned.get(item.id) ?? 0;
+        if (!exact && matchedTopics.length < minimumMatches && !semanticScore && !attachment)
             continue;
 
         const excerpt = focusedExcerpt(item, matchedTopics);
@@ -231,21 +339,32 @@ export function suggestProjectLinks(project: Project): ProjectSuggestions {
         const titleTopics = new Set(topicWords(`${item.title} ${item.url} ${item.tags.join(' ')}`));
         const excerptMatches = matchedTopics.filter(topic => excerptTopics.has(topic)).length;
         const titleMatches = matchedTopics.filter(topic => titleTopics.has(topic)).length;
-        if (!exact && Math.max(excerptMatches, titleMatches) < 2)
+        const keyword = exact || (matchedTopics.length >= minimumMatches && Math.max(excerptMatches, titleMatches) >= 2);
+        if (!keyword && !semanticScore && !attachment)
             continue;
 
-        links.push({
+        const topicScore = exact ? 0.94 : keyword ? 0.72 + 0.16 * matchedTopics.length / topics.length : 0;
+        const score = Math.max(topicScore, semanticScore, attachment ? 0.7 : 0) + 0.15 * attachment;
+        // Excerpts are always actual saved text; the model is only used for similarity.
+        const savedExcerpt = excerpt !== item.title && excerptMatches >= (exact ? 1 : 2) ? excerpt
+            : semanticScore && match ? snippet(match.text.trim(), [], 280)
+            : attachment ? snippet(item.summary || sourceDetails(item) || item.reason || item.note || item.content, [], 280)
+            : null;
+        ranked.push({ candidate, score, link: {
             itemId: item.id,
             title: item.title,
             url: item.url,
             topics: matchedTopics.slice(0, 4),
-            excerpt: excerpt !== item.title && excerptMatches >= (exact ? 1 : 2) ? excerpt : null,
+            excerpt: savedExcerpt && savedExcerpt !== item.title ? savedExcerpt : null,
             projectId: item.projectId,
-        });
-        if (links.length === 3)
-            break;
+            evidence: attachment ? 'attachment' : keyword ? 'topics' : 'semantic',
+        } });
     }
-    return { needsContext: topics.length === 1 && !candidates.some(candidate => candidate.exact), links };
+    ranked.sort((a, b) => b.score - a.score || compareFocusedItems(a.candidate, b.candidate));
+    return {
+        needsContext: !ranked.length && topics.length === 1 && !candidates.some(candidate => candidate.exact),
+        links: ranked.slice(0, 3).map(result => result.link),
+    };
 }
 
 function isRecommendation(question: string): boolean {

@@ -9,11 +9,13 @@ function ProjectLinkSuggestions({ project }: { project: Project }) {
     const { data, openItem, refresh, notify, confirm } = useWorkspace();
     const [result, setResult] = useState<{ revision: string; response?: ProjectSuggestions; error?: string } | null>(null);
     const [attempt, setAttempt] = useState(0);
-    const [attaching, setAttaching] = useState<string | null>(null);
+    const [pending, setPending] = useState<{ itemId: string; action: 'attach' | 'dismiss' } | null>(null);
     const [attachError, setAttachError] = useState('');
     const candidates = data.items.filter(item => item.url && item.status !== 'archived');
     const hasConnectedLinks = candidates.some(item => item.projectId === project.id);
-    const revision = JSON.stringify([project.name, project.goal, project.description, candidates.map(item => [item.id, item.projectId, item.updatedAt, item.metadata.enrichedAt])]);
+    const { provider, configured, consent, embeddingModel } = data.provider;
+    const revision = JSON.stringify([project.name, project.goal, project.description, provider, configured, consent, embeddingModel,
+        candidates.map(item => [item.id, item.projectId, item.updatedAt, item.metadata.enrichedAt])]);
     const projectId = project.id;
     useEffect(() => {
         let active = true;
@@ -28,32 +30,41 @@ function ProjectLinkSuggestions({ project }: { project: Project }) {
         setResult(null);
         setAttempt(value => value + 1);
     }
-    async function attachLink(link: ProjectSuggestions['links'][number]) {
-        setAttaching(link.itemId);
+    async function updateSuggestion(link: ProjectSuggestions['links'][number], action: 'attach' | 'dismiss') {
+        setPending({ itemId: link.itemId, action });
         setAttachError('');
         try {
-            await api(`projects/${projectId}/links`, 'POST', { itemId: link.itemId, expectedProjectId: link.projectId });
+            if (action === 'attach')
+                await api(`projects/${projectId}/links`, 'POST', { itemId: link.itemId, expectedProjectId: link.projectId });
+            else
+                await api(`projects/${projectId}/suggestions`, 'POST', { itemId: link.itemId });
             setResult(previous => previous?.response ? {
                 ...previous,
                 response: { ...previous.response, links: previous.response.links.filter(suggestion => suggestion.itemId !== link.itemId) },
             } : previous);
-            notify('Link attached.');
-            await refresh().catch(() => notify('Link attached. Reload the project to see it in Connected resources.'));
+            if (action === 'attach') {
+                notify('Link attached.');
+                await refresh().catch(() => notify('Link attached. Reload the project to see it in Connected resources.'));
+            }
+            else {
+                notify('Suggestion dismissed for this goal.');
+                setAttempt(value => value + 1);
+            }
         }
         catch (error) {
             setAttachError(errorMessage(error));
         }
         finally {
-            setAttaching(null);
+            setPending(null);
         }
     }
     function addLink(link: ProjectSuggestions['links'][number]) {
         if (link.projectId) {
             const source = data.projects.find(prior => prior.id === link.projectId)?.name || 'another project';
-            confirm('Move this saved link?', `Move this link from ${source} to ${project.name}?`, () => attachLink(link));
+            confirm('Move this saved link?', `Move this link from ${source} to ${project.name}?`, () => updateSuggestion(link, 'attach'));
             return;
         }
-        void attachLink(link);
+        void updateSuggestion(link, 'attach');
     }
     if (suggestions && !suggestions.links.length && hasConnectedLinks && !suggestions.needsContext && !attachError)
         return null;
@@ -67,11 +78,16 @@ function ProjectLinkSuggestions({ project }: { project: Project }) {
                     <button type="button" className="card-title" onClick={() => openItem(link.itemId)}>{link.title}</button>
                     <a href={link.url} target="_blank" rel="noreferrer" className="icon-button" aria-label={"Open website for " + link.title}><ArrowUpRight size={16}/></a>
                 </div>
-                <p className="project-suggestion-fit">Matches {new Intl.ListFormat(undefined).format(link.topics)} in your project.</p>
+                <p className="project-suggestion-fit">{link.evidence === 'attachment' ? 'You attached this to a similar project.'
+                    : link.evidence === 'semantic' ? 'The saved content is similar to your project goal.'
+                    : `Matches ${new Intl.ListFormat(undefined).format(link.topics)} in your project.`}</p>
                 {link.excerpt ? <p className="project-suggestion-excerpt">{link.excerpt}</p> : null}
-                <Button className="project-suggestion-attach" busy={attaching === link.itemId} disabled={!!attaching} onClick={() => addLink(link)}>
-                    <Link2 size={15}/>{link.projectId ? 'Move to project' : 'Attach to project'}
-                </Button>
+                <div className="inline-actions project-suggestion-attach">
+                    <Button busy={pending?.itemId === link.itemId && pending.action === 'attach'} disabled={!!pending} onClick={() => addLink(link)}>
+                        <Link2 size={15}/>{link.projectId ? 'Move to project' : 'Attach to project'}
+                    </Button>
+                    <Button variant="ghost" disabled={!!pending} onClick={() => void updateSuggestion(link, 'dismiss')}>Not relevant</Button>
+                </div>
             </li>)}
         </ul> : <div className="surface project-suggestion-message">
             {current?.error ? <><ErrorNotice message={current.error}/><Button onClick={retry}>Retry suggestions</Button></> :

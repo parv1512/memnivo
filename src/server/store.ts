@@ -40,6 +40,17 @@ function ensureRef(table: 'projects' | 'items' | 'tasks', id: string | null | un
     if (id && !one(`SELECT id FROM ${table} WHERE id=? AND user_id=?`, id, OWNER))
         throw new AppError(400, 'The linked record does not exist.');
 }
+export function projectFeedbackContext(project: Pick<Project, 'name' | 'goal' | 'description'>): string {
+    return [project.name, project.goal, project.description].join('\n').trim();
+}
+export function recordProjectLinkFeedback(projectId: string, itemId: string, signal: 'attached' | 'dismissed') {
+    const project = one<Pick<Project, 'name' | 'goal' | 'description'>>('SELECT name,goal,description FROM projects WHERE id=? AND user_id=?', projectId, OWNER);
+    if (!project)
+        throw new AppError(404, 'Project not found.');
+    run(`INSERT INTO project_link_feedback(project_id,item_id,context,signal,created_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(project_id,item_id,context) DO UPDATE SET signal=excluded.signal,created_at=excluded.created_at`,
+        projectId, itemId, projectFeedbackContext(project), signal, now());
+}
 function setTags(itemId: string, input: string[]) {
     run('DELETE FROM item_tags WHERE item_id=?', itemId);
     for (const name of normalizeTags(input)) {
@@ -94,6 +105,8 @@ export function createItem(input: unknown, { enrich = true }: {
         setTags(id, v.tags);
         indexChunks(id, itemText(v));
         activity(id, 'Captured item');
+        if (url && v.projectId && v.status !== 'archived')
+            recordProjectLinkFeedback(v.projectId, id, 'attached');
         if (enrich && v.sensitivity !== 'private' && (url || preferences().aiConsent))
             queueJob(id);
     });
@@ -134,6 +147,8 @@ export function updateItem(id: string, input: unknown, { sync = false }: {
         const indexedText = itemText(v);
         indexChunks(id, indexedText);
         activity(id, sync ? 'Updated from vault' : 'Edited item');
+        if (!sync && url && v.projectId && v.projectId !== prior.projectId && v.status !== 'archived')
+            recordProjectLinkFeedback(v.projectId, id, 'attached');
         if (v.sensitivity === 'private') {
             run('UPDATE embedding_chunks SET embedding=NULL,model=NULL WHERE item_id=?', id);
             run('DELETE FROM jobs WHERE item_id=?', id);
@@ -254,6 +269,9 @@ export function writeMessage(conversationId: string, role: 'user' | 'assistant',
     return id;
 }
 export function createConversation(title: string) { const id = uuid(); run('INSERT INTO conversations VALUES(?,?,?,?,?)', id, OWNER, title.slice(0, 100), now(), now()); return id; }
-export function exportData() { return { format: 'memnivo-export', version: 1, exportedAt: now(), preferences: preferences(), items: all<ItemRow>(`${itemSelect} WHERE i.user_id=? ORDER BY i.created_at DESC`, OWNER).map(mapItem), projects: projects(), tasks: tasks(), reminders: reminders(), relationships: relations(), conversations: conversations().map(c => ({ ...c, messages: conversationMessages(c.id) })), notifications: notifications() }; }
+export function exportData() { return { format: 'memnivo-export', version: 1, exportedAt: now(), preferences: preferences(), items: all<ItemRow>(`${itemSelect} WHERE i.user_id=? ORDER BY i.created_at DESC`, OWNER).map(mapItem), projects: projects(), tasks: tasks(), reminders: reminders(), relationships: relations(), conversations: conversations().map(c => ({ ...c, messages: conversationMessages(c.id) })), notifications: notifications(), projectLinkFeedback: all(
+        'SELECT f.project_id,f.item_id,f.context,f.signal,f.created_at FROM project_link_feedback f JOIN projects p ON f.project_id=p.id WHERE p.user_id=?',
+        OWNER,
+    ) }; }
 export function eraseData() { transaction(() => { run('DELETE FROM users WHERE id=?', OWNER); run('DELETE FROM items_fts'); run('DELETE FROM runtime_state'); run('INSERT INTO users VALUES(?,?,?,?,?)', OWNER, 'You', JSON.stringify({ ...preferences(), onboarded: false }), now(), now()); }); }
 export type NewItem = z.infer<typeof itemInput>;

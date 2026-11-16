@@ -44,6 +44,7 @@ export interface ProjectSuggestions {
         topics: string[];
         excerpt: string | null;
         projectId: string | null;
+        evidence: 'topics' | 'semantic' | 'attachment';
     }[];
 }
 export interface Task {

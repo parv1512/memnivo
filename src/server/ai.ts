@@ -8,13 +8,13 @@ export interface AIProvider {
         role: 'system' | 'user' | 'assistant';
         content: string;
     }[], json?: boolean): Promise<string>;
-    embed(texts: string[]): Promise<number[][]>;
+    embed(texts: string[], signal?: AbortSignal): Promise<number[][]>;
 }
 export function providerStatus(): ProviderStatus { const provider = process.env.AI_PROVIDER || 'none'; const base = process.env.AI_BASE_URL || (provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'); return { provider, configured: provider !== 'none' && !!process.env.AI_MODEL && (provider === 'ollama' || !!process.env.AI_API_KEY), model: process.env.AI_MODEL || '', embeddingModel: process.env.AI_EMBEDDING_MODEL || '', baseUrl: base, consent: preferences().aiConsent }; }
 class CompatibleProvider implements AIProvider {
-    async request(endpoint: string, body: object): Promise<unknown> {
+    async request(endpoint: string, body: object, signal = AbortSignal.timeout(60000)): Promise<unknown> {
         const config = providerStatus();
-        const response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/${endpoint}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.AI_API_KEY ? { authorization: `Bearer ${process.env.AI_API_KEY}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+        const response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/${endpoint}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.AI_API_KEY ? { authorization: `Bearer ${process.env.AI_API_KEY}` } : {}) }, body: JSON.stringify(body), signal });
         if (!response.ok)
             throw new Error(`AI provider returned HTTP ${response.status}. Check credentials, model, and usage limits.`);
         return response.json();
@@ -35,11 +35,11 @@ class CompatibleProvider implements AIProvider {
             throw new Error('The provider returned an empty answer.');
         return content;
     }
-    async embed(texts: string[]) {
+    async embed(texts: string[], signal?: AbortSignal) {
         const model = providerStatus().embeddingModel;
         if (!model)
             throw new Error('Set AI_EMBEDDING_MODEL to enable semantic retrieval.');
-        const result = await this.request('embeddings', { model, input: texts }) as {
+        const result = await this.request('embeddings', { model, input: texts }, signal) as {
             data?: {
                 index: number;
                 embedding: number[];

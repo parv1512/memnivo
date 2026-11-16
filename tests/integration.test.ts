@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { database, all, one, run, OWNER, preferences, setPreferences, uuid, now } from '../src/server/db';
 import { createItem, getItem, listItems, updateItem, deleteItem, createReminder, transitionReminder, reminders, saveProject, saveTask, tasks, addRelation, eraseData, exportData, conversationMessages } from '../src/server/store';
-import { search, ask } from '../src/server/retrieval';
+import { search, ask, suggestProjectLinks } from '../src/server/retrieval';
 import { processReminders } from '../src/server/reminders';
 import { connectVault, disconnectVault, syncVault, parseNote, allowedNote, resolveVaultConflict, vaultStatus } from '../src/server/vault';
 import { api } from '../src/server/api';
@@ -264,6 +264,73 @@ test('attaching a strong suggestion leaves weaker links out and safely handles r
     await attach(otherPath, project.id);
     assert.equal(getItem(best.id).projectId, other.id);
 });
+test('project suggestions ignore generic action words without AI', async () => {
+    const project = saveProject({ name: 'Research', goal: 'Finding a new startup idea' })!;
+    const link = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', summary: 'Browse startup ideas and market research.' }, { enrich: false });
+    const { links } = await suggestProjectLinks(project);
+    assert.deepEqual(links.map(suggestion => [suggestion.itemId, suggestion.evidence]), [[link.id, 'topics']]);
+});
+
+test('local Ollama matches by meaning, attachments boost related projects, and dismissals stay scoped', async () => {
+    const initial = saveProject({ name: 'Discovery', goal: 'Find a new startup idea' })!;
+    const similar = saveProject({ name: 'Planning', goal: 'Validate a business opportunity' })!;
+    const separate = saveProject({ name: 'Router', goal: 'Configure a packet network' })!;
+    const idea = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', content: 'Discover business opportunities and market gaps.' }, { enrich: false });
+    const reference = createItem({ title: 'Market notes', type: 'article', url: 'https://example.test/market', content: 'Explore promising opportunities.' }, { enrich: false });
+    const privateLink = createItem({ title: 'Private notes', type: 'article', url: 'https://example.test/private', content: 'Private fixture', sensitivity: 'private' }, { enrich: false });
+    const model = 'project-feedback-fixture';
+    run('UPDATE embedding_chunks SET embedding=?,model=? WHERE item_id=?', JSON.stringify([0.98, 0.2, 0]), 'ollama:' + model, idea.id);
+    for (const link of [reference, privateLink])
+        run('UPDATE embedding_chunks SET embedding=?,model=? WHERE item_id=?', JSON.stringify([1, 0, 0]), 'ollama:' + model, link.id);
+
+    const names = ['AI_PROVIDER', 'AI_BASE_URL', 'AI_MODEL', 'AI_EMBEDDING_MODEL'];
+    const originalEnv = names.map(name => [name, process.env[name]] as const);
+    const originalFetch = globalThis.fetch;
+    Object.assign(process.env, { AI_PROVIDER: 'ollama', AI_BASE_URL: 'http://127.0.0.1:11434/v1', AI_MODEL: 'test', AI_EMBEDDING_MODEL: model });
+    setPreferences({ ...preferences(), aiConsent: true });
+    globalThis.fetch = async (url, init) => {
+        assert.equal(String(url), 'http://127.0.0.1:11434/v1/embeddings');
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        return new Response(JSON.stringify({ data: body.input.map((context, index) => ({
+            index, embedding: /packet/.test(context) ? [0, 0, 1] : [1, 0, 0],
+        })) }));
+    };
+
+    try {
+        const before = await suggestProjectLinks(similar);
+        assert.deepEqual(before.links.map(link => link.itemId), [reference.id, idea.id]);
+        assert.equal(before.links[1].evidence, 'semantic');
+        assert.match(before.links[1].excerpt ?? '', /business opportunities/);
+
+        // The ordinary attachment path stores the goal. A later move or detach keeps that example.
+        updateItem(idea.id, { projectId: initial.id });
+        updateItem(idea.id, { projectId: initial.id });
+        updateItem(idea.id, { projectId: null });
+        assert.equal(all('SELECT * FROM project_link_feedback WHERE item_id=? AND signal=\'attached\'', idea.id).length, 1);
+        assert.equal((await suggestProjectLinks(separate)).links.length, 0);
+        const after = await suggestProjectLinks(similar);
+        assert.deepEqual(after.links.map(link => link.itemId), [idea.id, reference.id]);
+        assert.equal(after.links[0].evidence, 'attachment');
+
+        const origin = 'http://127.0.0.1:3000';
+        const request = new Request(`${origin}/api/projects/${similar.id}/suggestions`, {
+            method: 'POST', headers: { origin, host: '127.0.0.1:3000', cookie: `memnivo_session=${issueSession()}` },
+        });
+        await api(request, { itemId: idea.id });
+        assert.deepEqual((await suggestProjectLinks(similar)).links.map(link => link.itemId), [reference.id]);
+        assert.ok((await suggestProjectLinks(initial)).links.some(link => link.itemId === idea.id));
+    }
+    finally {
+        globalThis.fetch = originalFetch;
+        for (const [name, value] of originalEnv) {
+            if (value === undefined)
+                delete process.env[name];
+            else
+                process.env[name] = value;
+        }
+    }
+});
+
 test('recommendations cite the useful passage and skip items that only match generic language or one topic', async () => {
     const repo = createItem({
         title: 'Document Q&A starter',

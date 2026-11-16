@@ -15,7 +15,8 @@ The server binds only to loopback, rejects non-loopback Host headers, and refuse
 | PATCH | `/api/items/:id` | Partial saved-item edit, including tags and project assignment |
 | DELETE | `/api/items/:id` | Delete item and its dependent index/source/reminder records |
 | POST | `/api/projects` | Create project |
-| GET | `/api/projects/:id/suggestions` | Up to three saved links that match the project goal, description, or name |
+| GET | `/api/projects/:id/suggestions` | Up to three saved links ranked by topic overlap, local Ollama embeddings, and attachments to similar projects. Keyword matching works without a model. |
+| POST | `/api/projects/:id/suggestions` | Dismiss a saved link for the current project context using `{itemId}`. |
 | POST | `/api/projects/:id/links` | Attach a saved link using `{itemId, expectedProjectId}`. Use `null` for an unassigned link. |
 | PATCH, DELETE | `/api/projects/:id` | Update/delete project; linked items/tasks survive deletion |
 | POST | `/api/tasks` | Create task |
