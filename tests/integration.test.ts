@@ -230,6 +230,40 @@ test('projects suggest saved links from their goals and update after the source 
     const named = saveProject({ name: 'PeakCut' })!;
     assert.deepEqual((await suggestions(named.id)).links.map(({ itemId }) => itemId), [nameMatch.id]);
 });
+test('attaching a strong suggestion leaves weaker links out and safely handles retries', async () => {
+    const project = saveProject({ name: 'Voice demo', goal: 'Voice generation Python audio synthesis deployment' })!;
+    const other = saveProject({ name: 'A second project' })!;
+    const best = createItem({
+        title: 'Voice generation Python audio synthesis deployment',
+        type: 'article',
+        url: 'https://example.test/voice-sdk',
+    }, { enrich: false });
+    createItem({
+        title: 'Python audio deployment checklist',
+        type: 'article',
+        url: 'https://example.test/audio-checklist',
+        content: 'Deploy a Python audio player with a static playlist.',
+    }, { enrich: false });
+
+    const origin = 'http://127.0.0.1:3000';
+    const headers = { origin, host: '127.0.0.1:3000', cookie: `memnivo_session=${issueSession()}` };
+    const path = `${origin}/api/projects/${project.id}`;
+    const getSuggestions = async () => (await api(new Request(`${path}/suggestions`, { headers }), undefined)).body as ProjectSuggestions;
+    function attach(projectUrl: string, expectedProjectId: string | null) {
+        return api(new Request(`${projectUrl}/links`, { method: 'POST', headers }), { itemId: best.id, expectedProjectId });
+    }
+
+    assert.deepEqual((await getSuggestions()).links.map(link => link.itemId), [best.id]);
+    await attach(path, null);
+    await attach(path, null);
+    assert.equal(getItem(best.id).projectId, project.id);
+    assert.deepEqual(await getSuggestions(), { needsContext: false, links: [] });
+    const otherPath = `${origin}/api/projects/${other.id}`;
+    await assert.rejects(attach(otherPath, null), /project changed/);
+    assert.equal(getItem(best.id).projectId, project.id);
+    await attach(otherPath, project.id);
+    assert.equal(getItem(best.id).projectId, other.id);
+});
 test('recommendations cite the useful passage and skip items that only match generic language or one topic', async () => {
     const repo = createItem({
         title: 'Document Q&A starter',

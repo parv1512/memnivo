@@ -18,7 +18,6 @@ export interface SearchOptions {
     limit?: number;
     semantic?: boolean;
     focus?: { topics: string[]; minimumMatches: number };
-    filter?: (item: Item) => boolean;
 }
 export interface SearchHit {
     item: Item;
@@ -64,6 +63,10 @@ function scoreFocusedItem(item: Item, topics: string[], query: string) {
     const score = matchedTopics.reduce((sum, topic) => sum + (title.has(topic) ? 5 : 2), 0) + (exact ? 18 : 0);
 
     return { item, score, methods: exact ? ['Exact match'] : matchedTopics.length ? ['Topic match'] : [], matchedTopics, excerpt: '', exact, similarity: 0 };
+}
+
+function compareFocusedItems(a: ReturnType<typeof scoreFocusedItem>, b: ReturnType<typeof scoreFocusedItem>): number {
+    return Number(b.exact) - Number(a.exact) || b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt) || a.item.id.localeCompare(b.item.id);
 }
 
 function focusedExcerpt(item: Item, topics: string[]): string {
@@ -116,8 +119,6 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
         items = items.filter(i => i.projectId === opts.scopeId);
     if (/unfinished|not started/i.test(query))
         items = items.filter(i => !['completed', 'archived'].includes(i.status));
-    if (opts.filter)
-        items = items.filter(opts.filter);
     const fts = new Map<string, number>();
     if (!focused && tokens.length) {
         try {
@@ -188,7 +189,7 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     if (focused && focusedResults) {
         const topical = focusedResults.filter(result => result.exact || result.matchedTopics.length >= focused.minimumMatches);
         const candidates = topical.length ? topical : focusedResults.filter(result => result.similarity >= 0.65);
-        candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt) || a.item.id.localeCompare(b.item.id));
+        candidates.sort(compareFocusedItems);
         const cutoff = (candidates[0]?.score ?? 0) * 0.55;
         return candidates.filter(result => result.score >= cutoff).slice(0, opts.limit || 3).map(result => ({
             item: result.item,
@@ -208,27 +209,43 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     return results.filter(r => !query.trim() || r.score > 0).sort((a, b) => b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt)).slice(0, opts.limit || 30);
 }
 
-export async function suggestProjectLinks(project: Project): Promise<ProjectSuggestions> {
+export function suggestProjectLinks(project: Project): ProjectSuggestions {
     const statedTopics = questionTopics(`${project.goal}\n${project.description}`);
     const namedTopics = questionTopics(project.name);
     const topics = statedTopics.length >= 2 ? statedTopics : [...new Set([...statedTopics, ...namedTopics])];
     if (!topics.length)
         return { needsContext: true, links: [] };
 
-    const hits = await search('', {
-        limit: 3,
-        semantic: false,
-        filter: item => !!item.url && item.projectId !== project.id,
-        focus: { topics, minimumMatches: 2 },
-    });
-    const links = hits.flatMap(({ item, excerpt, matchedTopics = [] }) => {
-        if (!item.url)
-            return [];
+    const candidates = listItems().filter(item => item.url && item.status !== 'archived')
+        .map(item => scoreFocusedItem(item, topics, ''));
+    // Connected links still set the coverage bar after they leave the suggestion list.
+    const bestCoverage = Math.max(0, ...candidates.map(candidate => candidate.matchedTopics.length));
+    const minimumMatches = Math.max(2, Math.min(3, topics.length), Math.ceil(bestCoverage * 0.75));
+    const links: ProjectSuggestions['links'] = [];
+    for (const { item, matchedTopics, exact } of candidates.sort(compareFocusedItems)) {
+        if (!item.url || item.projectId === project.id || (!exact && matchedTopics.length < minimumMatches))
+            continue;
+
+        const excerpt = focusedExcerpt(item, matchedTopics);
         const excerptTopics = new Set(topicWords(excerpt));
-        const hasExcerpt = excerpt !== item.title && matchedTopics.some(topic => excerptTopics.has(topic));
-        return [{ itemId: item.id, title: item.title, url: item.url, topics: matchedTopics.slice(0, 4), excerpt: hasExcerpt ? excerpt : null }];
-    });
-    return { needsContext: topics.length === 1 && !links.length, links };
+        const titleTopics = new Set(topicWords(`${item.title} ${item.url} ${item.tags.join(' ')}`));
+        const excerptMatches = matchedTopics.filter(topic => excerptTopics.has(topic)).length;
+        const titleMatches = matchedTopics.filter(topic => titleTopics.has(topic)).length;
+        if (!exact && Math.max(excerptMatches, titleMatches) < 2)
+            continue;
+
+        links.push({
+            itemId: item.id,
+            title: item.title,
+            url: item.url,
+            topics: matchedTopics.slice(0, 4),
+            excerpt: excerpt !== item.title && excerptMatches >= (exact ? 1 : 2) ? excerpt : null,
+            projectId: item.projectId,
+        });
+        if (links.length === 3)
+            break;
+    }
+    return { needsContext: topics.length === 1 && !candidates.some(candidate => candidate.exact), links };
 }
 
 function isRecommendation(question: string): boolean {

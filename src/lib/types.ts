@@ -43,6 +43,7 @@ export interface ProjectSuggestions {
         url: string;
         topics: string[];
         excerpt: string | null;
+        projectId: string | null;
     }[];
 }
 export interface Task {

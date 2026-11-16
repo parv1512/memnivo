@@ -16,6 +16,7 @@ The server binds only to loopback, rejects non-loopback Host headers, and refuse
 | DELETE | `/api/items/:id` | Delete item and its dependent index/source/reminder records |
 | POST | `/api/projects` | Create project |
 | GET | `/api/projects/:id/suggestions` | Up to three saved links that match the project goal, description, or name |
+| POST | `/api/projects/:id/links` | Attach a saved link using `{itemId, expectedProjectId}`. Use `null` for an unassigned link. |
 | PATCH, DELETE | `/api/projects/:id` | Update/delete project; linked items/tasks survive deletion |
 | POST | `/api/tasks` | Create task |
 | PATCH, DELETE | `/api/tasks/:id` | Edit/complete/delete task |

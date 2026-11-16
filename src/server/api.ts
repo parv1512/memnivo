@@ -70,7 +70,23 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
             const project = store.projects().find(p => p.id === id);
             if (!project)
                 throw new store.AppError(404, 'Project not found.');
-            return { body: await suggestProjectLinks(project) };
+            return { body: suggestProjectLinks(project) };
+        }
+        if (method === 'POST' && id && parts[2] === 'links') {
+            const { itemId, expectedProjectId } = z.object({
+                itemId: z.string().uuid(),
+                expectedProjectId: z.string().uuid().nullable(),
+            }).parse(body);
+            return { body: transaction(() => {
+                const item = store.getItem(itemId);
+                if (!item.url || item.status === 'archived')
+                    throw new store.AppError(409, 'This link is unavailable. Refresh the project and try again.');
+                if (item.projectId === id)
+                    return item;
+                if (item.projectId !== expectedProjectId)
+                    throw new store.AppError(409, 'This link’s project changed. Refresh the project and try again.');
+                return store.updateItem(itemId, { projectId: id });
+            }) };
         }
         if (method === 'POST')
             return { status: 201, body: store.saveProject(body) };

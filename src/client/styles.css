@@ -27,4 +27,5 @@
 .project-suggestion-fit, .project-suggestion-excerpt { margin: 5px 0 0; overflow-wrap: anywhere; }
 .project-suggestion-fit { color: var(--muted); font-size: 12px; }
 .project-suggestion-excerpt { font-size: 13px; line-height: 1.5; }
+.project-suggestion-attach { margin-top: 10px; }
 .project-suggestion-message > p { margin: 0; }

@@ -6,11 +6,14 @@ import { api, errorMessage, localInput, isoInput, humanDate } from './api';
 import { dayInZone } from '../lib/core';
 import type { Project, Task, Reminder, ProjectSuggestions } from '../lib/types';
 function ProjectLinkSuggestions({ project }: { project: Project }) {
-    const { data, openItem } = useWorkspace();
+    const { data, openItem, refresh, notify, confirm } = useWorkspace();
     const [result, setResult] = useState<{ revision: string; response?: ProjectSuggestions; error?: string } | null>(null);
     const [attempt, setAttempt] = useState(0);
-    const candidates = data.items.filter(item => item.url && item.status !== "archived" && item.projectId !== project.id);
-    const revision = JSON.stringify([project.name, project.goal, project.description, candidates.map(item => [item.id, item.updatedAt, item.metadata.enrichedAt])]);
+    const [attaching, setAttaching] = useState<string | null>(null);
+    const [attachError, setAttachError] = useState('');
+    const candidates = data.items.filter(item => item.url && item.status !== 'archived');
+    const hasConnectedLinks = candidates.some(item => item.projectId === project.id);
+    const revision = JSON.stringify([project.name, project.goal, project.description, candidates.map(item => [item.id, item.projectId, item.updatedAt, item.metadata.enrichedAt])]);
     const projectId = project.id;
     useEffect(() => {
         let active = true;
@@ -25,8 +28,39 @@ function ProjectLinkSuggestions({ project }: { project: Project }) {
         setResult(null);
         setAttempt(value => value + 1);
     }
+    async function attachLink(link: ProjectSuggestions['links'][number]) {
+        setAttaching(link.itemId);
+        setAttachError('');
+        try {
+            await api(`projects/${projectId}/links`, 'POST', { itemId: link.itemId, expectedProjectId: link.projectId });
+            setResult(previous => previous?.response ? {
+                ...previous,
+                response: { ...previous.response, links: previous.response.links.filter(suggestion => suggestion.itemId !== link.itemId) },
+            } : previous);
+            notify('Link attached.');
+            await refresh().catch(() => notify('Link attached. Reload the project to see it in Connected resources.'));
+        }
+        catch (error) {
+            setAttachError(errorMessage(error));
+        }
+        finally {
+            setAttaching(null);
+        }
+    }
+    function addLink(link: ProjectSuggestions['links'][number]) {
+        if (link.projectId) {
+            const source = data.projects.find(prior => prior.id === link.projectId)?.name || 'another project';
+            confirm('Move this saved link?', `Move this link from ${source} to ${project.name}?`, () => attachLink(link));
+            return;
+        }
+        void attachLink(link);
+    }
+    if (suggestions && !suggestions.links.length && hasConnectedLinks && !suggestions.needsContext && !attachError)
+        return null;
+
     return <section className="project-suggestions" aria-label="Suggested resources">
         <SectionHead title="Suggested resources"/>
+        <ErrorNotice message={attachError}/>
         {suggestions?.links.length ? <ul className="surface project-suggestion-list">
             {suggestions.links.map(link => <li key={link.itemId}>
                 <div className="project-suggestion-title">
@@ -35,6 +69,9 @@ function ProjectLinkSuggestions({ project }: { project: Project }) {
                 </div>
                 <p className="project-suggestion-fit">Matches {new Intl.ListFormat(undefined).format(link.topics)} in your project.</p>
                 {link.excerpt ? <p className="project-suggestion-excerpt">{link.excerpt}</p> : null}
+                <Button className="project-suggestion-attach" busy={attaching === link.itemId} disabled={!!attaching} onClick={() => addLink(link)}>
+                    <Link2 size={15}/>{link.projectId ? 'Move to project' : 'Attach to project'}
+                </Button>
             </li>)}
         </ul> : <div className="surface project-suggestion-message">
             {current?.error ? <><ErrorNotice message={current.error}/><Button onClick={retry}>Retry suggestions</Button></> :
