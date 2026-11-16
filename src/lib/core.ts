@@ -1,4 +1,20 @@
-import type { ItemType } from './types';
+import type { Item, ItemType } from './types';
+export function savedContentBasis(item: Item): string {
+    if (item.content && item.source === 'Text import')
+        return 'Imported Markdown or text';
+    if (item.content && (item.metadata.manualContent || (item.url && !item.metadata.contentImported)))
+        return 'Text saved in Memnivo';
+    if (typeof item.metadata.contentBasis === 'string')
+        return item.metadata.contentBasis;
+    if (item.url)
+        return item.type === 'video' ? 'Saved video link. No transcript retrieved.' : 'Saved link and any notes you added';
+    return item.content ? 'Saved text' : 'Saved title and notes';
+}
+export function sourceDetails(item: Item): string {
+    const { title, description, channel, language, topics } = item.metadata;
+    return [title === item.title ? '' : title, description, channel, language, ...(Array.isArray(topics) ? topics : [])]
+        .filter((value): value is string => typeof value === 'string' && !!value.trim()).join('\n');
+}
 export function normalizeTags(input: string[] | string): string[] {
     const tags = typeof input === 'string' ? input.split(',') : input;
     return [...new Set(tags.map(t => t.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-')).filter(Boolean))].slice(0, 20);

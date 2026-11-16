@@ -1,41 +1,32 @@
-# Verification
+# Memnivo 1.0 release candidate verification
 
-Verified on Windows with Node.js 24.11.1 and SQLite 3.50.4, October 29, 2026.
+November 15, 2026 · `1.0.0-rc.1` · Windows, Node.js 24.11.1 and SQLite
 
-## Executed checks
+The v0.9 baseline passed 36 tests before the v1.0 fixes. The tests created fresh workspaces and a disposable Obsidian vault.
 
-- `npm run typecheck`: strict TypeScript.
-- `npm run lint`: source syntax and unsafe-render checks (a focused custom check, not ESLint).
-- `npm test`: **29 tests passed**, covering unit behavior, database integration, controlled AI/embedding, local filesystem vault, and server-rendered screens.
-- `npm run test:e2e`: 16 API endpoint calls exercising session setup, preferences, project creation, YouTube URL capture, reason persistence, reminder creation, cited natural-language retrieval, snooze, completion, archive, export and deletion. A separate Node process reopens the database to verify restart persistence.
-- `npm run build`: type-checked browser and server production artifacts. No runtime CDN dependencies. The browser bundle is approximately 2.8 MB before gzip.
-- Server and companion launched successfully and reported readiness on the isolated QA port. No real user data was inserted.
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Installation and build | PASS | Clean dependency install from the lockfile, 42 automated tests, 16-call API workflow, and production build. The HTTP health endpoint reported `1.0.0-rc.1`. The server and companion also started concurrently against an empty data directory. |
+| Browser and persistence | PASS | In a fresh Chrome profile at 1366 px, completed onboarding, opened Quick capture with the keyboard, verified focus and Escape, saved a note, restarted the server, asked a question, opened the cited note, attached it to a project, and completed a task. A greeting returned no sources. |
+| Automatic project suggestions | PASS | In Chrome, a new project surfaced a saved website with supporting evidence, skipped an unrelated link, and updated after a new link was saved or attached. The suggestion panel also fit the 390 px layout. |
+| Narrow layout | PASS | All nine destinations fit the 390 px viewport. Opened the navigation and capture dialog. No JavaScript exceptions or console errors occurred during the browser workflow. |
+| Capture and public source details | PASS | Live HTTP saves fetched a public W3C page, a GitHub repository README, and YouTube oEmbed metadata. The YouTube record identified the metadata-only coverage. Regression tests covered fetch failure and recovery, edited text, obsolete responses after URL changes, canonical duplicates, and atomic capture with a follow-up. |
+| Retrieval and AI | PASS | Provider-free cited retrieval, filtered Library search, honest no-match results, private-item exclusions, a blocked request with consent disabled, and actionable feedback for a controlled provider HTTP 401. A live Ollama run with Gemma 3 4B produced a cited answer and mxbai-embed-large generated a 1,024-dimensional vector. |
+| Reminders | PASS | A running companion recorded an in-app reminder with Chrome closed. With the companion stopped, a later reminder waited and was recorded once after restart. Another reminder arrived while a 14-second enrichment request was still running. Automated checks cover quiet hours, budgets, recurrence, DST, snooze, completion and offsets on older records. |
+| Obsidian | PASS | A disposable vault verified selection, import, unchanged files, rename, edits, conflict resolution, source deletion, a large skipped note, exclusion and disconnect. Imported copies survived exclusion and disconnect. Source files were read-only. |
+| Ownership and recovery | PASS | Markdown import, portable JSON import and rollback, export, and deletion tested. A stopped workspace was copied and opened from a new data directory. The copy retained items, projects, completed tasks, notifications, and conversations. |
 
-Important coverage includes exact-host URL classification, URL normalization/deduplication, tag normalization, server input validation, intent prompts, quiet hours, daily budgets, one-time notification behavior, recurring schedules across DST transitions, SSRF address rejection, origin/session protection, linked task/reminder completion, SQL foreign-key integrity, incremental chunk indexing, real retrieval citations, honest no-match responses, private AI exclusions, invalid AI source rejection, metadata suggestion review, and export/deletion.
+YouTube oEmbed timed out on an initial attempt. The release candidate retrieved metadata from the same public video through its companion on a subsequent run. Source availability still depends on the external service.
 
-The vault fixture is an actual directory with an `.obsidian` marker and Markdown files. Tests import selected folders, preserve raw source bytes, retain unchanged chunk identity, follow a rename, process edits/deletions, preserve conflicting source/local copies, and resolve a conflict by an explicit choice. These tests use disposable fixtures in the writable project area, not the user's real notes.
+## Release checkpoint
 
-Each of the nine navigation destinations renders distinct content in server-rendering tests, including meaningful empty states. A separate escaping test ensures a saved `<script>` title renders as text.
+**Ready for review.** The app uses the existing SQLite schema. See the [backup and restore steps](../README.md#back-up-and-restore-a-workspace) for the full workspace recovery procedure.
 
-## Not verified in this environment
+Personal usage and pilot feedback remain open. The roadmap calls for five real save → find → act journeys over about a week and a small initial group completing that workflow. The user's actual Obsidian vault and operating-system desktop notification delivery were outside these checks.
 
-- Live browser UI: in-app browser attachment failed with a session-binding error; desktop browser attachment failed with `foreground window did not report a process id`. Therefore visual screenshots, real responsive overflow, pointer/keyboard interactions, browser console and live client mount are **not** marked passed.
-- Loopback HTTP smoke tests from the executor: outbound socket connections, including `127.0.0.1`, were denied by the sandbox with `EACCES`. API tests call the same validated handler directly. Starting the listener is not claimed as a successful browser request.
-- Paid/live AI providers, public metadata endpoints, real external API rate limits and local Ollama requests: credentials/outbound access were unavailable. Provider boundaries are tested using controlled responses.
-- The user's actual Obsidian vault or an installed Obsidian app: a vault must be explicitly selected using the companion CLI. Fixture tests do not substitute for testing that particular vault.
-- OS background service installation, closed-browser push, email/SMS delivery, cloud identity/sync, PDF/DOCX binary extraction and Obsidian write-back: not implemented and not claimed.
+## Try the core workflow
 
-## Manual acceptance checklist
-
-On a normal local terminal, run `npm start`, then open `http://127.0.0.1:3000`:
-
-1. Complete onboarding; capture a YouTube link with a reason and optional follow-up.
-2. Refresh, open Inbox, edit the title/notes/tags and move the item to the library.
-3. Ask about the saved video; inspect the cited saved record and open its original source.
-4. Snooze the reminder, mark the video completed, and confirm the reminder resolves.
-5. Create a project, attach the video, and add/complete a task.
-6. Connect a small test vault with include/exclude folders; change, rename and delete a source note and inspect sync status.
-7. Compare light/dark modes and check desktop/tablet/mobile widths, dialog focus/Escape, capture shortcut, graph drag/focus, loading states, network failures and browser-console errors.
-8. Export JSON, stop and restart the app, and confirm data remains. Use disposable test data when checking deletion.
-
-This is a local MVP implementation with explicit limits, not a certification of production readiness or cloud security.
+1. Start Memnivo with `npm start` and open `http://127.0.0.1:3000`.
+2. Save a note or link you expect to use for an actual task. Add a follow-up if you want to revisit it.
+3. Ask a specific question about what you saved. Open the cited record and check the source details.
+4. Attach the record to a project. Create a task, take the next step, and mark it complete.

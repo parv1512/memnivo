@@ -1,10 +1,48 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, FolderKanban, ArrowUpRight, Target, Check, MoreHorizontal, Trash2, Pencil, Clock, Bell, CalendarDays, List, ChevronLeft, ChevronRight, Link2, ArrowRight, CheckCheck, Pause } from 'lucide-react';
 import { useWorkspace } from './context';
 import { Button, Modal, Field, Empty, ItemRow, SectionHead, Status, ErrorNotice } from './ui';
 import { api, errorMessage, localInput, isoInput, humanDate } from './api';
 import { dayInZone } from '../lib/core';
-import type { Project, Task, Reminder } from '../lib/types';
+import type { Project, Task, Reminder, ProjectSuggestions } from '../lib/types';
+function ProjectLinkSuggestions({ project }: { project: Project }) {
+    const { data, openItem } = useWorkspace();
+    const [result, setResult] = useState<{ revision: string; response?: ProjectSuggestions; error?: string } | null>(null);
+    const [attempt, setAttempt] = useState(0);
+    const candidates = data.items.filter(item => item.url && item.status !== "archived" && item.projectId !== project.id);
+    const revision = JSON.stringify([project.name, project.goal, project.description, candidates.map(item => [item.id, item.updatedAt, item.metadata.enrichedAt])]);
+    const projectId = project.id;
+    useEffect(() => {
+        let active = true;
+        void api<ProjectSuggestions>("projects/" + projectId + "/suggestions")
+            .then(response => { if (active) setResult({ revision, response }); })
+            .catch(error => { if (active) setResult({ revision, error: errorMessage(error) }); });
+        return () => { active = false; };
+    }, [projectId, revision, attempt]);
+    const current = result?.revision === revision ? result : null;
+    const suggestions = current?.response;
+    function retry() {
+        setResult(null);
+        setAttempt(value => value + 1);
+    }
+    return <section className="project-suggestions" aria-label="Suggested resources">
+        <SectionHead title="Suggested resources"/>
+        {suggestions?.links.length ? <ul className="surface project-suggestion-list">
+            {suggestions.links.map(link => <li key={link.itemId}>
+                <div className="project-suggestion-title">
+                    <button type="button" className="card-title" onClick={() => openItem(link.itemId)}>{link.title}</button>
+                    <a href={link.url} target="_blank" rel="noreferrer" className="icon-button" aria-label={"Open website for " + link.title}><ArrowUpRight size={16}/></a>
+                </div>
+                <p className="project-suggestion-fit">Matches {new Intl.ListFormat(undefined).format(link.topics)} in your project.</p>
+                {link.excerpt ? <p className="project-suggestion-excerpt">{link.excerpt}</p> : null}
+            </li>)}
+        </ul> : <div className="surface project-suggestion-message">
+            {current?.error ? <><ErrorNotice message={current.error}/><Button onClick={retry}>Retry suggestions</Button></> :
+                <p className="muted" role="status">{!suggestions ? "Checking your saved links…" : suggestions.needsContext
+                    ? "Add a specific goal or description to find useful saved links." : "No saved links match this project yet."}</p>}
+        </div>}
+    </section>;
+}
 export function ProjectsView({ queryString }: {
     queryString: string;
 }) {
@@ -31,7 +69,7 @@ export function ProjectsView({ queryString }: {
             setBusy(false);
         }
     }
-    return <><div className="page-heading"><div><div className="eyebrow">TURN SAVED INSPIRATION INTO SOMETHING REAL</div><h1>{project ? project.name : 'Ideas in motion'}{!project ? <span className="count-pill">{data.projects.length}</span> : null}</h1><p>{project ? project.description : 'A little structure for the things you want to make happen.'}</p></div><div className="inline-actions">{project ? <><Button onClick={() => navigate('/projects')}>All projects</Button><Button onClick={() => setEditing({ ...project })}><Pencil size={15}/> Edit project</Button></> : <Button variant="primary" onClick={() => setEditing({ name: '', description: '', goal: '', status: 'active' })}><Plus size={16}/> New project</Button>}</div></div>{project ? <><div className="project-detail-summary"><div><Target size={20}/><span><small>WHAT YOU’RE WORKING TOWARD</small><strong>{project.goal || 'Add a goal to give this project a direction.'}</strong></span></div><Status status={project.status}/></div><div className="project-stats"><span><strong>{project.itemCount}</strong> saved resources</span><span><strong>{project.completedCount}/{project.taskCount}</strong> tasks complete</span><div className="progress-track"><span style={{ width: `${project.taskCount ? project.completedCount / project.taskCount * 100 : 0}%` }}/></div></div><div className="project-columns"><section><SectionHead title="Connected resources" aside={<Button variant="ghost" onClick={capture}><Plus size={14}/> Capture</Button>}/><div className="surface">{data.items.filter(i => i.projectId === project.id).length ? data.items.filter(i => i.projectId === project.id).map(i => <ItemRow key={i.id} item={i} onOpen={() => openItem(i)}/>) : <Empty title="Bring your resources together" description="Attach the notes, repositories, and ideas that will help you move forward."/>}</div><div className="attach-item"><select aria-label="Choose a resource to attach" value={attach} onChange={e => setAttach(e.target.value)}><option value="">Attach an existing item…</option>{data.items.filter(i => i.projectId !== project.id && i.status !== 'archived').map(i => <option key={i.id} value={i.id}>{i.title}</option>)}</select><Button disabled={!attach} onClick={async () => {
+    return <><div className="page-heading"><div><div className="eyebrow">TURN SAVED INSPIRATION INTO SOMETHING REAL</div><h1>{project ? project.name : 'Ideas in motion'}{!project ? <span className="count-pill">{data.projects.length}</span> : null}</h1><p>{project ? project.description : 'A little structure for the things you want to make happen.'}</p></div><div className="inline-actions">{project ? <><Button onClick={() => navigate('/projects')}>All projects</Button><Button onClick={() => setEditing({ ...project })}><Pencil size={15}/> Edit project</Button></> : <Button variant="primary" onClick={() => setEditing({ name: '', description: '', goal: '', status: 'active' })}><Plus size={16}/> New project</Button>}</div></div>{project ? <><div className="project-detail-summary"><div><Target size={20}/><span><small>WHAT YOU’RE WORKING TOWARD</small><strong>{project.goal || 'Add a goal to give this project a direction.'}</strong></span></div><Status status={project.status}/></div><div className="project-stats"><span><strong>{project.itemCount}</strong> saved resources</span><span><strong>{project.completedCount}/{project.taskCount}</strong> tasks complete</span><div className="progress-track"><span style={{ width: `${project.taskCount ? project.completedCount / project.taskCount * 100 : 0}%` }}/></div></div><div className="project-columns"><div className="project-resources"><ProjectLinkSuggestions key={project.id} project={project}/><section><SectionHead title="Connected resources" aside={<Button variant="ghost" onClick={capture}><Plus size={14}/> Capture</Button>}/><div className="surface">{data.items.filter(i => i.projectId === project.id).length ? data.items.filter(i => i.projectId === project.id).map(i => <ItemRow key={i.id} item={i} onOpen={() => openItem(i)}/>) : <Empty title="Bring your resources together" description="Attach the notes, repositories, and ideas that will help you move forward."/>}</div><div className="attach-item"><select aria-label="Choose a resource to attach" value={attach} onChange={e => setAttach(e.target.value)}><option value="">Attach an existing item…</option>{data.items.filter(i => i.projectId !== project.id && i.status !== 'archived').map(i => <option key={i.id} value={i.id}>{i.title}</option>)}</select><Button disabled={!attach} onClick={async () => {
                 try {
                     await api(`items/${attach}`, 'PATCH', { projectId: project.id });
                     await refresh();
@@ -41,7 +79,7 @@ export function ProjectsView({ queryString }: {
                 catch (e) {
                     notify(errorMessage(e));
                 }
-            }}><Link2 size={15}/> Attach</Button></div></section><section><SectionHead title="Next steps"/><div className="surface project-task-list">{data.tasks.filter(t => t.projectId === project.id).map(t => <div className={`project-task ${t.status === 'completed' ? 'done' : ''}`} key={t.id}><button className="check-button" aria-label={`Mark ${t.title} ${t.status === 'completed' ? 'open' : 'completed'}`} onClick={async () => { await api(`tasks/${t.id}`, 'PATCH', { status: t.status === 'completed' ? 'open' : 'completed' }); await refresh(); }}><Check size={15}/></button><span>{t.title}</span><button className="icon-button" aria-label={`Delete task ${t.title}`} onClick={() => confirm('Delete task?', 'The linked saved resources will remain.', async () => { await api(`tasks/${t.id}`, 'DELETE'); await refresh(); })}><Trash2 size={13}/></button></div>)}{!data.tasks.some(t => t.projectId === project.id) ? <p className="project-no-tasks">What’s the next small step?</p> : null}<form className="inline-task-form" onSubmit={async (e) => {
+            }}><Link2 size={15}/> Attach</Button></div></section></div><section><SectionHead title="Next steps"/><div className="surface project-task-list">{data.tasks.filter(t => t.projectId === project.id).map(t => <div className={`project-task ${t.status === 'completed' ? 'done' : ''}`} key={t.id}><button className="check-button" aria-label={`Mark ${t.title} ${t.status === 'completed' ? 'open' : 'completed'}`} onClick={async () => { await api(`tasks/${t.id}`, 'PATCH', { status: t.status === 'completed' ? 'open' : 'completed' }); await refresh(); }}><Check size={15}/></button><span>{t.title}</span><button className="icon-button" aria-label={`Delete task ${t.title}`} onClick={() => confirm('Delete task?', 'The linked saved resources will remain.', async () => { await api(`tasks/${t.id}`, 'DELETE'); await refresh(); })}><Trash2 size={13}/></button></div>)}{!data.tasks.some(t => t.projectId === project.id) ? <p className="project-no-tasks">What’s the next small step?</p> : null}<form className="inline-task-form" onSubmit={async (e) => {
                 e.preventDefault();
                 if (!taskTitle.trim())
                     return;

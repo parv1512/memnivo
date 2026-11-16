@@ -1,12 +1,15 @@
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { authorize, assertOrigin, rateLimit, issueSession, COOKIE } from './security';
-import { all, one, run, OWNER, now, uuid, preferences, setPreferences, database } from './db';
+import { all, one, run, OWNER, now, uuid, preferences, setPreferences, database, transaction } from './db';
 import * as store from './store';
-import { preferencesInput, chatInput, relationInput } from '../lib/validation';
+import { preferencesInput, chatInput, relationInput, reminderInput } from '../lib/validation';
 import { providerStatus, aiProvider } from './ai';
-import { search, ask } from './retrieval';
+import { search, ask, suggestProjectLinks } from './retrieval';
 import { vaultStatus, vaultLogs, syncVault, resolveVaultConflict, disconnectVault, normalizeRule } from './vault';
 import type { Snapshot } from '../lib/types';
+const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
+const captureFollowUp = z.object({ followUp: reminderInput.pick({ dueAt: true, timezone: true }).optional() });
 export interface ApiResult {
     status?: number;
     body?: unknown;
@@ -21,7 +24,7 @@ export function snapshot(): Snapshot {
 export async function api(request: Request, body: unknown): Promise<ApiResult> {
     const url = new URL(request.url), parts = url.pathname.split('/').filter(Boolean).slice(1), method = request.method;
     if (parts[0] === 'health' && method === 'GET')
-        return { body: { ok: true, version: '0.1.0' } };
+        return { body: { ok: true, version } };
     if (parts[0] === 'session' && method === 'POST') {
         assertOrigin(request);
         rateLimit('session', 60);
@@ -43,10 +46,18 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
             const matches = await search(query, { type: url.searchParams.get('type') || undefined, status: url.searchParams.get('status') || undefined, tag: url.searchParams.get('tag') || undefined, projectId: url.searchParams.get('project') || undefined, from: url.searchParams.get('from') || undefined, to: url.searchParams.get('to') || undefined, includeArchived: url.searchParams.get('archived') === 'true', limit: 1000 });
             return { body: { results: matches.slice(offset, offset + limit), total: matches.length, limit, offset } };
         }
-        if (method === 'POST' && !id)
-            return { status: 201, body: store.createItem(body) };
+        if (method === 'POST' && !id) {
+            const { followUp } = captureFollowUp.parse(body);
+            const item = transaction(() => {
+                const saved = store.createItem(body);
+                if (followUp)
+                    store.createReminder({ ...followUp, itemId: saved.id, title: `Revisit: ${saved.title}`.slice(0, 240) });
+                return saved;
+            });
+            return { status: 201, body: item };
+        }
         if (method === 'GET' && id)
-            return { body: { item: store.getItem(id), activity: all('SELECT id,item_id itemId,action,created_at createdAt FROM activities WHERE item_id=? AND user_id=? ORDER BY created_at DESC LIMIT 50', id, OWNER), vaultReference: one('SELECT relative_path path,obsidian_uri uri,status FROM vault_notes WHERE item_id=?', id) || null, jobs: all('SELECT id,kind,status,error FROM jobs WHERE item_id=? ORDER BY created_at DESC LIMIT 5', id) } };
+            return { body: { item: store.getItem(id), activity: all('SELECT id,item_id itemId,action,created_at createdAt FROM activities WHERE item_id=? AND user_id=? ORDER BY created_at DESC LIMIT 50', id, OWNER), jobs: all("SELECT id,kind,status,CASE WHEN error IS NOT NULL THEN 'Background processing failed.' END error FROM jobs WHERE item_id=? ORDER BY created_at DESC,rowid DESC LIMIT 5", id), vaultReference: one('SELECT relative_path path,obsidian_uri uri,status FROM vault_notes WHERE item_id=?', id) || null, enrichment: one('SELECT status,error IS NOT NULL retrying FROM jobs WHERE item_id=? AND kind=\'enrich\' ORDER BY created_at DESC,rowid DESC LIMIT 1', id) || null } };
         if (method === 'PATCH' && id)
             return { body: store.updateItem(id, body) };
         if (method === 'DELETE' && id) {
@@ -55,6 +66,12 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
         }
     }
     if (parts[0] === 'projects') {
+        if (method === 'GET' && id && parts[2] === 'suggestions') {
+            const project = store.projects().find(p => p.id === id);
+            if (!project)
+                throw new store.AppError(404, 'Project not found.');
+            return { body: await suggestProjectLinks(project) };
+        }
         if (method === 'POST')
             return { status: 201, body: store.saveProject(body) };
         if (method === 'PATCH' && id)
@@ -125,13 +142,26 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
         const provider = aiProvider();
         if (!provider)
             throw new store.AppError(400, 'Configure the server environment and enable AI consent first.');
-        const response = await provider.complete([{ role: 'user', content: 'Reply with only: Connection successful. No personal data is included in this test.' }]);
-        return { body: { message: response.slice(0, 200) } };
+        try {
+            await provider.complete([{ role: 'user', content: 'Reply with only: Connection successful. No personal data is included in this test.' }]);
+            return { body: { message: 'Chat model connected.' } };
+        }
+        catch (error) {
+            const status = error instanceof Error ? /^AI provider returned HTTP (\d{3})\./.exec(error.message)?.[1] : undefined;
+            const hint = status === '401' || status === '403' ? 'Check your API key and model permissions.' : 'Check that the provider is running and the configured model is available.';
+            throw new store.AppError(502, `Could not reach the configured chat model. ${hint}`, 'PROVIDER_UNAVAILABLE');
+        }
     }
     if (parts[0] === 'enrich' && id && method === 'POST') {
-        store.getItem(id);
-        store.queueJob(id);
-        return { body: { queued: true } };
+        const queued = transaction(() => {
+            const item = store.getItem(id);
+            if (item.sensitivity === 'private')
+                throw new store.AppError(400, 'This item is private. Enrichment is disabled.');
+            if (!item.url && !aiProvider())
+                throw new store.AppError(400, 'Configure and enable AI to enrich saved notes.');
+            return store.queueJob(id);
+        });
+        return { body: { queued } };
     }
     if (parts[0] === 'suggestions' && id && method === 'POST') {
         const v = z.object({ action: z.enum(['apply', 'dismiss']) }).parse(body);
@@ -150,7 +180,7 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
     }
     if (parts[0] === 'reindex' && method === 'POST') {
         for (const item of store.listItems()) {
-            store.indexChunks(item.id, `${item.title}\n${item.content}\n${item.summary}\n${item.reason}\n${item.note}\n${item.tags.join(' ')}`);
+            store.indexChunks(item.id, store.itemText(item));
             if (item.sensitivity !== 'private')
                 store.queueJob(item.id, 'embed');
         }
@@ -191,21 +221,30 @@ export async function api(request: Request, body: unknown): Promise<ApiResult> {
         if (v.content.includes('\0'))
             throw new store.AppError(400, 'Binary documents are not supported. Import UTF-8 Markdown or text.');
         if (v.filename.toLowerCase().endsWith('.json')) {
-            const data = z.object({ format: z.literal('memnivo-export'), items: z.array(z.unknown()).max(1000) }).parse(JSON.parse(v.content));
-            let imported = 0, skipped = 0;
-            for (const entry of data.items) {
-                try {
-                    store.createItem({ ...entry as object, projectId: null }, { enrich: false });
-                    imported++;
-                }
-                catch (error) {
-                    if (error instanceof store.AppError && error.code === 'DUPLICATE')
-                        skipped++;
-                    else
-                        throw error;
-                }
+            let source: unknown;
+            try {
+                source = JSON.parse(v.content);
             }
-            return { body: { imported, skipped } };
+            catch {
+                throw new store.AppError(400, 'This file contains invalid JSON. Choose a Memnivo export.');
+            }
+            const data = z.object({ format: z.literal('memnivo-export'), items: z.array(z.unknown()).max(1000) }).parse(source);
+            return { body: transaction(() => {
+                let imported = 0, skipped = 0;
+                for (const entry of data.items) {
+                    try {
+                        store.createItem({ ...entry as object, projectId: null }, { enrich: false });
+                        imported++;
+                    }
+                    catch (error) {
+                        if (error instanceof store.AppError && error.code === 'DUPLICATE')
+                            skipped++;
+                        else
+                            throw error;
+                    }
+                }
+                return { imported, skipped };
+            }) };
         }
         return { status: 201, body: store.createItem({ title: v.filename.replace(/\.(md|txt)$/i, ''), type: 'document', content: v.content, source: 'Text import' }, { enrich: false }) };
     }

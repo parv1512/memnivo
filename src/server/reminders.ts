@@ -14,7 +14,8 @@ export function processReminders(clock = new Date()): number {
             if (!budget)
                 break;
             const occurrence = reminder.snoozedUntil || reminder.dueAt;
-            if (!['upcoming', 'snoozed'].includes(reminder.status) || occurrence > clock.toISOString() || reminder.lastNotifiedAt)
+            const dueAt = Date.parse(occurrence);
+            if (!['upcoming', 'snoozed'].includes(reminder.status) || !Number.isFinite(dueAt) || dueAt > clock.getTime() || reminder.lastNotifiedAt)
                 continue;
             const result = run('INSERT OR IGNORE INTO notifications(id,user_id,reminder_id,occurrence,title,body,created_at) VALUES(?,?,?,?,?,?,?)', uuid(), OWNER, reminder.id, occurrence, reminder.title, reminder.note || 'You asked to revisit this. Complete it, snooze it, or dismiss it.', clock.toISOString());
             run('UPDATE reminders SET last_notified_at=?,updated_at=? WHERE id=?', clock.toISOString(), clock.toISOString(), reminder.id);

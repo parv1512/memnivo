@@ -10,11 +10,12 @@ The server binds only to loopback, rejects non-loopback Host headers, and refuse
 | POST | `/api/session` | Same-origin local session establishment |
 | GET | `/api/snapshot` | Current bounded workspace state, preferences, provider status and worker heartbeat |
 | GET | `/api/items` | Query items; parameters `q`, `type`, `status`, `tag`, `project`, `from`, `to`, `archived`, `limit` (max 100), `offset` |
-| POST | `/api/items` | Validated capture; duplicate conflict returns existing item ID |
+| POST | `/api/items` | Capture with optional `followUp: {dueAt, timezone}` in the same transaction. Duplicate conflict returns the existing item ID. |
 | GET | `/api/items/:id` | Item, source/vault reference, activity and enrichment-job state |
 | PATCH | `/api/items/:id` | Partial saved-item edit, including tags and project assignment |
 | DELETE | `/api/items/:id` | Delete item and its dependent index/source/reminder records |
 | POST | `/api/projects` | Create project |
+| GET | `/api/projects/:id/suggestions` | Up to three saved links that match the project goal, description, or name |
 | PATCH, DELETE | `/api/projects/:id` | Update/delete project; linked items/tasks survive deletion |
 | POST | `/api/tasks` | Create task |
 | PATCH, DELETE | `/api/tasks/:id` | Edit/complete/delete task |
@@ -29,7 +30,7 @@ The server binds only to loopback, rejects non-loopback Host headers, and refuse
 | DELETE | `/api/relationships/:id` | Remove a link |
 | PUT | `/api/preferences` | Validate/persist the complete preference object |
 | POST | `/api/provider-test` | Test configured provider after consent; contains no saved content |
-| POST | `/api/enrich/:itemId` | Queue supported metadata / AI suggestion extraction |
+| POST | `/api/enrich/:itemId` | Queue supported source details or AI suggestions. `queued: false` means a job is already pending or running. |
 | POST | `/api/suggestions/:itemId` | `{action: apply|dismiss}` review of suggested metadata |
 | POST | `/api/reindex` | Rebuild local chunks and queue missing embeddings |
 | POST | `/api/vault` | Run sync for the CLI-authorized vault |
@@ -37,7 +38,7 @@ The server binds only to loopback, rejects non-loopback Host headers, and refuse
 | PATCH | `/api/vault/:itemId` | Resolve conflict `{choice: source|local}` |
 | DELETE | `/api/vault` | Disconnect without changing source files |
 | POST, DELETE | `/api/saved-searches[/:id]` | Save/remove query text |
-| POST | `/api/import` | `{filename, content}`; `.md`, `.txt`, or Memnivo `.json`; 1 MB text cap |
+| POST | `/api/import` | `{filename, content}` for Markdown, text, or a Memnivo JSON export. Individual item content is capped at 250,000 characters. Invalid JSON imports save no items. |
 | GET | `/api/export` | Portable JSON without secrets or absolute vault roots |
 | DELETE | `/api/data` | Explicit confirmation string `DELETE ALL MY DATA`; clears the local workspace |
 

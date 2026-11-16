@@ -35,6 +35,16 @@ export interface Project {
     taskCount: number;
     completedCount: number;
 }
+export interface ProjectSuggestions {
+    needsContext: boolean;
+    links: {
+        itemId: string;
+        title: string;
+        url: string;
+        topics: string[];
+        excerpt: string | null;
+    }[];
+}
 export interface Task {
     id: string;
     title: string;

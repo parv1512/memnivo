@@ -24,7 +24,7 @@ interface Ref {
     imported_hash: string;
     status: string;
 }
-export function parseNote(raw: string, relativePath: string) { const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/); const value = match ? parseYaml(match[1], { maxAliasCount: 30 }) : {}; const data: Record<string, unknown> = value && typeof value === 'object' && !Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : {}; const content = match ? raw.slice(match[0].length) : raw; const title = typeof data.title === 'string' ? data.title : content.match(/^#\s+(.+)$/m)?.[1] || path.basename(relativePath, '.md'); const frontTags = Array.isArray(data.tags) ? data.tags : typeof data.tags === 'string' ? data.tags.split(/[, ]/) : []; const inlineTags = [...content.matchAll(/(?:^|\s)#([\p{L}\p{N}_/-]+)/gu)].map(x => x[1]); return { raw, title, body: content, frontmatter: data, tags: normalizeTags([...frontTags.filter((x: unknown) => typeof x === 'string'), ...inlineTags]), links: [...content.matchAll(/!?\[\[([^\]#|]+)(?:[^\]]*)\]\]/g)].map(x => x[1]), stableId: typeof data.id === 'string' ? data.id : typeof data.uid === 'string' ? data.uid : null }; }
+export function parseNote(raw: string, relativePath: string) { const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/); const value = match ? parseYaml(match[1], { maxAliasCount: 30 }) : {}; const data: Record<string, unknown> = value && typeof value === 'object' && !Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : {}; const content = match ? raw.slice(match[0].length) : raw; const title = ((typeof data.title === 'string' && data.title.trim()) || content.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(relativePath, '.md')).slice(0, 240); const frontTags = Array.isArray(data.tags) ? data.tags : typeof data.tags === 'string' ? data.tags.split(/[, ]/) : []; const inlineTags = [...content.matchAll(/(?:^|\s)#([\p{L}\p{N}_/-]+)/gu)].map(x => x[1]); return { raw, title, body: content, frontmatter: data, tags: normalizeTags([...frontTags.filter((x: unknown) => typeof x === 'string'), ...inlineTags]).filter(tag => tag.length <= 60), links: [...content.matchAll(/!?\[\[([^\]#|]+)(?:[^\]]*)\]\]/g)].map(x => x[1]), stableId: typeof data.id === 'string' ? data.id : typeof data.uid === 'string' ? data.uid : null }; }
 export function normalizeRule(rule: string) {
     const clean = rule.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     if (clean.split('/').some(s => s === '..' || s === '.') || /^[a-z]:/i.test(clean))
@@ -44,7 +44,7 @@ export async function connectVault(root: string, includes: string[] = [], exclud
     const absolute = await realpath(path.resolve(root));
     if (!(await lstat(absolute)).isDirectory())
         throw new Error('Select an existing vault directory.');
-    if (!await lstat(path.join(absolute, '.obsidian')).catch(() => null))
+    if (!(await lstat(path.join(absolute, '.obsidian')).catch(() => null))?.isDirectory())
         throw new Error('This folder is not an Obsidian vault (.obsidian directory not found).');
     const existing = one<VaultRow>('SELECT * FROM vault_connections WHERE user_id=?', OWNER);
     if (existing)
@@ -72,8 +72,11 @@ async function walk(root: string, dir: string, includes: string[], excludes: str
         const full = path.join(dir, entry.name), relative = path.relative(root, full).replace(/\\/g, '/');
         if (excludes.some(e => relative === e || relative.startsWith(`${e}/`)))
             continue;
-        if (entry.isDirectory())
-            await walk(root, full, includes, excludes, files);
+        if (entry.isDirectory()) {
+            const relevant = !includes.length || includes.some(rule => relative === rule || relative.startsWith(rule + '/') || rule.startsWith(relative + '/'));
+            if (relevant)
+                await walk(root, full, includes, excludes, files);
+        }
         else if (entry.isFile() && allowedNote(relative, includes, excludes))
             files.push(relative);
         if (files.length > 5000)
@@ -119,6 +122,10 @@ export async function syncVault() {
             }
             let note: ReturnType<typeof parseNote>;
             const raw = await readFile(resolved, 'utf8');
+            if (raw.length > 250000) {
+                log(connection.id, 'skipped', `${relative}: exceeds the 250,000-character note limit.`);
+                continue;
+            }
             try {
                 note = parseNote(raw, relative);
             }
@@ -129,7 +136,7 @@ export async function syncVault() {
             const digest = hash(raw);
             let ref = refs.find(r => r.relative_path === relative);
             if (!ref) {
-                const matches = refs.filter(r => !seen.has(r.id) && !files.includes(r.relative_path) && ((note.stableId && r.stable_id === note.stableId) || r.file_hash === digest));
+                const matches = refs.filter(r => !seen.has(r.id) && !files.includes(r.relative_path) && allowedNote(r.relative_path, includes, excludes) && ((note.stableId && r.stable_id === note.stableId) || r.file_hash === digest));
                 if (matches.length === 1) {
                     ref = matches[0];
                     run('UPDATE vault_notes SET relative_path=?,obsidian_uri=? WHERE id=?', relative, `obsidian://open?vault=${encodeURIComponent(connection.name)}&file=${encodeURIComponent(relative)}`, ref.id);
@@ -163,7 +170,7 @@ export async function syncVault() {
                     continue;
                 }
                 const updated = updateItem(local.id, { title: note.title, content: raw, tags: note.tags, status: local.status === 'archived' ? 'saved' : local.status }, { sync: true });
-                metadata(local.id, { ...local.metadata, vaultPath: relative, vaultName: connection.name, frontmatter: note.frontmatter, wikilinks: note.links, contentBasis: 'Obsidian Markdown source (read-only)' });
+                metadata(local.id, { ...updated.metadata, vaultPath: relative, vaultName: connection.name, frontmatter: note.frontmatter, wikilinks: note.links, contentBasis: 'Obsidian Markdown source (read-only)' });
                 run('UPDATE vault_notes SET file_hash=?,imported_hash=?,stable_id=?,last_synced_at=?,status=\'synced\' WHERE id=?', digest, updated.contentHash, note.stableId, now(), ref.id);
                 activeLinks.push({ id: local.id, links: note.links });
                 changed++;
@@ -187,7 +194,7 @@ export async function syncVault() {
             }
         }
         for (const ref of refs) {
-            if (seen.has(ref.id) || files.includes(ref.relative_path) || ref.status === 'deleted')
+            if (seen.has(ref.id) || files.includes(ref.relative_path) || ref.status === 'deleted' || !allowedNote(ref.relative_path, includes, excludes))
                 continue;
             if (ref.item_id) {
                 const local = getItem(ref.item_id);
@@ -240,11 +247,19 @@ export async function resolveVaultConflict(itemId: string, choice: 'source' | 'l
         return;
     }
     const connection = one<VaultRow>('SELECT * FROM vault_connections WHERE id=?', ref.connection_id)!;
+    if (!allowedNote(ref.relative_path, JSON.parse(connection.includes), JSON.parse(connection.excludes)))
+        throw new AppError(400, 'This note is outside the current vault folder rules.');
     const file = await realpath(path.join(connection.root_path, ref.relative_path));
     if (!file.startsWith((await realpath(connection.root_path)) + path.sep))
         throw new AppError(400, 'Invalid vault source.');
-    const raw = await readFile(file, 'utf8'), parsed = parseNote(raw, ref.relative_path);
+    if ((await lstat(file)).size > 1000000)
+        throw new AppError(400, 'This vault note exceeds the size limit.');
+    const raw = await readFile(file, 'utf8');
+    if (raw.length > 250000)
+        throw new AppError(400, 'This vault note exceeds the 250,000-character limit.');
+    const parsed = parseNote(raw, ref.relative_path);
     const updated = updateItem(itemId, { title: parsed.title, content: raw, tags: parsed.tags }, { sync: true });
+    metadata(itemId, { ...updated.metadata, frontmatter: parsed.frontmatter, wikilinks: parsed.links });
     run('UPDATE vault_notes SET file_hash=?,imported_hash=?,status=\'synced\',last_synced_at=? WHERE id=?', hash(raw), updated.contentHash, now(), ref.id);
 }
 export function disconnectVault() { run('DELETE FROM vault_connections WHERE user_id=?', OWNER); }

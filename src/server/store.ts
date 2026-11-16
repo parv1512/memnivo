@@ -64,32 +64,35 @@ export function indexChunks(id: string, content: string) {
     }
     run('DELETE FROM embedding_chunks WHERE item_id=? AND chunk_index>=?', id, chunks.length);
 }
+export function itemText(item: Pick<Item, 'title' | 'content' | 'summary' | 'reason' | 'note' | 'tags'>): string {
+    return [item.title, item.content, item.summary, item.reason, item.note, normalizeTags(item.tags).join(' ')].join('\n');
+}
 export function queueJob(itemId: string, kind = 'enrich') {
-    if (one('SELECT id FROM jobs WHERE item_id=? AND kind=? AND status IN (\'pending\',\'running\')', itemId, kind))
-        return;
-    run('INSERT INTO jobs(id,item_id,kind,status,run_at,created_at) VALUES(?,?,?,\'pending\',?,?)', uuid(), itemId, kind, now(), now());
+    return transaction(() => {
+        if (one('SELECT id FROM jobs WHERE item_id=? AND kind=? AND status IN (\'pending\',\'running\')', itemId, kind))
+            return false;
+        run('INSERT INTO jobs(id,item_id,kind,status,run_at,created_at) VALUES(?,?,?,\'pending\',?,?)', uuid(), itemId, kind, now(), now());
+        return true;
+    });
 }
 export function createItem(input: unknown, { enrich = true }: {
     enrich?: boolean;
 } = {}): Item {
     const v = itemInput.parse(input);
-    ensureRef('projects', v.projectId);
     const url = v.url ? normalizeUrl(v.url) : null;
     if (v.url && !url)
         throw new AppError(400, 'Use a valid public HTTP or HTTPS URL.');
     const digest = hash(`${v.title}\n${v.content}`);
-    const duplicate = url ? one<{
-        id: string;
-    }>('SELECT id FROM items WHERE user_id=? AND canonical_url=?', OWNER, url) : one<{
-        id: string;
-    }>('SELECT id FROM items WHERE user_id=? AND content_hash=?', OWNER, digest);
-    if (duplicate)
-        throw new AppError(409, 'This is already in your library. Open the existing item.', 'DUPLICATE', { itemId: duplicate.id });
     const id = uuid(), time = now();
     transaction(() => {
+        ensureRef('projects', v.projectId);
+        const duplicate = url ? one<{ id: string }>('SELECT id FROM items WHERE user_id=? AND canonical_url=?', OWNER, url)
+            : one<{ id: string }>('SELECT id FROM items WHERE user_id=? AND content_hash=?', OWNER, digest);
+        if (duplicate)
+            throw new AppError(409, 'This is already in your library. Open the existing item.', 'DUPLICATE', { itemId: duplicate.id });
         run('INSERT INTO items(id,user_id,type,title,canonical_url,source,content,summary,personal_note,reason,status,sensitivity,favorite,project_id,content_hash,created_at,updated_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, OWNER, v.type, v.title, url, v.source, v.content, v.summary, v.note, v.reason, v.status, v.sensitivity, Number(v.favorite), v.projectId ?? null, digest, time, time, v.status === 'archived' ? time : null);
         setTags(id, v.tags);
-        indexChunks(id, `${v.title}\n${v.content}\n${v.summary}\n${v.reason}\n${v.note}\n${v.tags.join(' ')}`);
+        indexChunks(id, itemText(v));
         activity(id, 'Captured item');
         if (enrich && v.sensitivity !== 'private' && (url || preferences().aiConsent))
             queueJob(id);
@@ -99,32 +102,54 @@ export function createItem(input: unknown, { enrich = true }: {
 export function updateItem(id: string, input: unknown, { sync = false }: {
     sync?: boolean;
 } = {}): Item {
-    const prior = getItem(id);
     const patch = itemPatch.parse(input);
-    const v = itemInput.parse({ ...prior, ...patch });
-    ensureRef('projects', v.projectId);
-    const url = v.url ? normalizeUrl(v.url) : null;
-    if (v.url && !url)
-        throw new AppError(400, 'Use a valid HTTP or HTTPS URL.');
-    if (url && one('SELECT id FROM items WHERE canonical_url=? AND user_id=? AND id<>?', url, OWNER, id))
-        throw new AppError(409, 'Another item already uses this link.', 'DUPLICATE');
-    transaction(() => {
-        run('UPDATE items SET type=?,title=?,canonical_url=?,source=?,content=?,summary=?,personal_note=?,reason=?,status=?,sensitivity=?,favorite=?,project_id=?,content_hash=?,updated_at=?,archived_at=? WHERE id=? AND user_id=?', v.type, v.title, url, v.source, v.content, v.summary, v.note, v.reason, v.status, v.sensitivity, Number(v.favorite), v.projectId ?? null, hash(`${v.title}\n${v.content}`), now(), v.status === 'archived' ? (prior.archivedAt || now()) : null, id, OWNER);
+    return transaction(() => {
+        const prior = getItem(id);
+        const v = itemInput.parse({ ...prior, ...patch });
+        ensureRef('projects', v.projectId);
+        const url = v.url ? normalizeUrl(v.url) : null;
+        if (v.url && !url)
+            throw new AppError(400, 'Use a valid HTTP or HTTPS URL.');
+        if (url && one('SELECT id FROM items WHERE canonical_url=? AND user_id=? AND id<>?', url, OWNER, id))
+            throw new AppError(409, 'Another item already uses this link.', 'DUPLICATE');
+
+        const sourceChanged = url !== prior.url || (!!url && v.type !== prior.type);
+        const meta = sourceChanged ? {} : { ...prior.metadata };
+        const removedOldText = sourceChanged && v.content === prior.content && prior.metadata.importedContentHash === hash(prior.content);
+        if (removedOldText)
+            v.content = '';
+        if (!sync && !removedOldText && v.content !== prior.content) {
+            delete meta.importedContentHash;
+            delete meta.contentImported;
+            delete meta.aiSuggestions;
+            meta.manualContent = true;
+        }
+        if (sync && prior.source === 'Obsidian' && patch.content !== undefined) {
+            delete meta.manualContent;
+            delete meta.aiSuggestions;
+        }
+
+        run('UPDATE items SET type=?,title=?,canonical_url=?,source=?,content=?,summary=?,personal_note=?,reason=?,status=?,sensitivity=?,favorite=?,project_id=?,metadata=?,content_hash=?,updated_at=?,archived_at=? WHERE id=? AND user_id=?', v.type, v.title, url, v.source, v.content, v.summary, v.note, v.reason, v.status, v.sensitivity, Number(v.favorite), v.projectId ?? null, JSON.stringify(meta), hash(`${v.title}\n${v.content}`), now(), v.status === 'archived' ? (prior.archivedAt || now()) : null, id, OWNER);
         setTags(id, v.tags);
-        indexChunks(id, `${v.title}\n${v.content}\n${v.summary}\n${v.reason}\n${v.note}\n${v.tags.join(' ')}`);
+        const indexedText = itemText(v);
+        indexChunks(id, indexedText);
         activity(id, sync ? 'Updated from vault' : 'Edited item');
         if (v.sensitivity === 'private') {
             run('UPDATE embedding_chunks SET embedding=NULL,model=NULL WHERE item_id=?', id);
             run('DELETE FROM jobs WHERE item_id=?', id);
         }
-        else if (!sync && preferences().aiConsent && v.content !== prior.content)
+        else if (!sync && url && (sourceChanged || prior.sensitivity === 'private')) {
+            run('DELETE FROM jobs WHERE item_id=? AND kind=\'enrich\'', id);
+            queueJob(id);
+        }
+        else if (!sync && preferences().aiConsent && indexedText !== itemText(prior))
             queueJob(id, 'embed');
         if (v.status === 'completed') {
             run('UPDATE reminders SET status=\'completed\',updated_at=? WHERE item_id=? AND status IN (\'upcoming\',\'snoozed\')', now(), id);
             run('UPDATE tasks SET status=\'completed\',completed_at=?,updated_at=? WHERE item_id=? AND status<>\'completed\'', now(), now(), id);
         }
+        return getItem(id);
     });
-    return getItem(id);
 }
 export function deleteItem(id: string) { getItem(id); transaction(() => { run('DELETE FROM reminders WHERE item_id=?', id); run('DELETE FROM items WHERE id=? AND user_id=?', id, OWNER); run('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM item_tags)'); }); }
 export function metadata(id: string, value: Record<string, unknown>) { getItem(id); run('UPDATE items SET metadata=? WHERE id=? AND user_id=?', JSON.stringify(value), id, OWNER); }
@@ -218,7 +243,7 @@ export function conversationMessages(id: string): Message[] {
             created_at: string;
             canonical_url: string | null;
             methods: string;
-        }>('SELECT c.*,i.title,i.created_at,i.canonical_url FROM citations c JOIN items i ON i.id=c.item_id WHERE c.message_id=? AND i.user_id=?', m.id, OWNER).map(c => ({ itemId: c.item_id, title: c.title, excerpt: c.excerpt, score: c.relevance, createdAt: c.created_at, url: c.canonical_url, methods: JSON.parse(c.methods) })) }));
+        }>('SELECT c.*,i.title,i.created_at,i.canonical_url FROM citations c JOIN items i ON i.id=c.item_id WHERE c.message_id=? AND i.user_id=? ORDER BY c.rowid', m.id, OWNER).map(c => ({ itemId: c.item_id, title: c.title, excerpt: c.excerpt, score: c.relevance, createdAt: c.created_at, url: c.canonical_url, methods: JSON.parse(c.methods) })) }));
 }
 export function writeMessage(conversationId: string, role: 'user' | 'assistant', content: string, citations: Citation[] = [], mode = 'retrieval') {
     const id = uuid();

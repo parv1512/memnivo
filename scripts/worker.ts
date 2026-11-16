@@ -3,13 +3,20 @@ import { all, one, run, now, transaction } from '../src/server/db';
 import { enrichItem, embedItem } from '../src/server/ai';
 import { syncVault, vaultStatus } from '../src/server/vault';
 let running = false, lastVault = 0;
+function tickReminders() {
+    try {
+        heartbeat();
+        processReminders();
+    }
+    catch {
+        console.error('Reminder processing failed. Check database access.');
+    }
+}
 async function tick() {
     if (running)
         return;
     running = true;
     try {
-        heartbeat();
-        processReminders();
         const stale = new Date(Date.now() - 180000).toISOString();
         run('UPDATE jobs SET status=\'pending\',lease_at=NULL WHERE status=\'running\' AND lease_at<?', stale);
         const job = transaction(() => {
@@ -29,10 +36,10 @@ async function tick() {
                     await embedItem(job.item_id);
                 else
                     await enrichItem(job.item_id);
-                run('UPDATE jobs SET status=\'completed\',error=NULL WHERE id=?', job.id);
+                run('UPDATE jobs SET status=\'completed\',error=NULL,lease_at=NULL WHERE id=?', job.id);
             }
-            catch (error) {
-                run('UPDATE jobs SET status=?,run_at=?,error=? WHERE id=?', job.attempts >= 2 ? 'failed' : 'pending', new Date(Date.now() + 60000 * 2 ** job.attempts).toISOString(), error instanceof Error ? error.message : 'Enrichment failed', job.id);
+            catch {
+                run('UPDATE jobs SET status=?,run_at=?,error=?,lease_at=NULL WHERE id=?', job.attempts >= 2 ? 'failed' : 'pending', new Date(Date.now() + 60000 * 2 ** job.attempts).toISOString(), 'Background processing failed.', job.id);
                 console.error('An enrichment job failed; review the item or provider configuration.');
             }
         }
@@ -55,6 +62,10 @@ async function tick() {
 }
 void all('SELECT version FROM schema_migrations');
 console.log('Memnivo companion running: durable reminders, enrichment, and read-only vault sync.');
-void tick();
-const timer = setInterval(() => void tick(), 5000);
+function cycle() {
+    tickReminders();
+    void tick();
+}
+cycle();
+const timer = setInterval(cycle, 5000);
 process.on('SIGTERM', () => { clearInterval(timer); process.exit(0); });

@@ -39,22 +39,11 @@ export function Capture({ open, onClose }: {
             const url = normalizeUrl(v.input);
             if (/^https?:/i.test(v.input.trim()) && !url)
                 throw new Error('This URL is invalid. Check the address.');
-            const item = await api<Item>('items', 'POST', { title: v.title.trim() || titleFrom(v.input), type: v.type === 'auto' ? classify(v.input) : v.type, url, content: url ? '' : v.input, source: url ? new URL(url).hostname : 'Personal note', reason: v.reason, tags: normalizeTags(v.tags), projectId: v.projectId || null, sensitivity: v.sensitivity });
-            if (v.due) {
-                try {
-                    await api('reminders', 'POST', { title: `Revisit: ${item.title}`, itemId: item.id, dueAt: isoInput(v.due), timezone: data.preferences.timezone });
-                }
-                catch (e) {
-                    await refresh();
-                    onClose();
-                    openItem(item);
-                    notify(`Item saved. Reminder was not created: ${errorMessage(e)}`);
-                    return;
-                }
-            }
-            await refresh();
+            const followUp = v.due ? { dueAt: isoInput(v.due), timezone: data.preferences.timezone } : undefined;
+            await api<Item>('items', 'POST', { title: v.title.trim() || titleFrom(v.input), type: v.type === 'auto' ? classify(v.input) : v.type, url, content: url ? '' : v.input, source: url ? new URL(url).hostname : 'Personal note', reason: v.reason, tags: normalizeTags(v.tags), projectId: v.projectId || null, sensitivity: v.sensitivity, followUp });
             notify(v.due ? 'Saved with a follow-up.' : 'Saved to your inbox.');
             onClose();
+            void refresh().catch(() => notify('Item saved. Reload the workspace to see it.'));
         }
         catch (e) {
             setError(errorMessage(e));

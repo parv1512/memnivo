@@ -19,21 +19,24 @@ export function database(): DatabaseSync {
         return globalDB.memnivoDB;
     mkdirSync(dir, { recursive: true });
     const db = new DatabaseSync(target);
-    db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;');
+    db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;');
     db.exec('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
     for (const file of readdirSync(path.resolve('migrations')).filter(f => /^\d+.*\.sql$/.test(f)).sort()) {
         const version = Number(file.split('_')[0]);
-        if (!db.prepare('SELECT version FROM schema_migrations WHERE version=?').get(version)) {
-            db.exec('BEGIN IMMEDIATE');
-            try {
+        if (db.prepare('SELECT version FROM schema_migrations WHERE version=?').get(version))
+            continue;
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            // The server and companion can both start against a fresh database.
+            if (!db.prepare('SELECT version FROM schema_migrations WHERE version=?').get(version)) {
                 db.exec(readFileSync(path.join('migrations', file), 'utf8'));
                 db.prepare('INSERT INTO schema_migrations VALUES(?,?)').run(version, now());
-                db.exec('COMMIT');
             }
-            catch (error) {
-                db.exec('ROLLBACK');
-                throw error;
-            }
+            db.exec('COMMIT');
+        }
+        catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
         }
     }
     db.prepare('INSERT OR IGNORE INTO users(id,display_name,preferences,created_at,updated_at) VALUES(?,?,?,?,?)').run(OWNER, 'You', JSON.stringify(defaultPreferences()), now(), now());

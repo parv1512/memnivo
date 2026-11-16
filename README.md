@@ -2,7 +2,7 @@
 
 A local-first personal memory workspace: capture links and notes, find them through cited conversational retrieval, connect an Obsidian vault, and follow through with durable reminders.
 
-This is a working single-owner MVP with SQLite persistence and a separate companion process. There is no demo data in the real workspace.
+Memnivo 1.0 RC 1 is a single-owner local workspace with SQLite persistence and a separate companion process. There is no demo data in the real workspace.
 
 ## Run on this computer
 
@@ -30,7 +30,7 @@ No PostgreSQL server, cloud account, AI subscription, or Obsidian plugin is need
 ## First use
 
 1. Complete the short onboarding and enter your display name.
-2. Use **Quick capture** or **Ctrl+Shift+N** to save a URL or thought. Add a reason if useful. AI enrichment does not block saving.
+2. Use **Quick capture** or **Ctrl+Shift+N** to save a URL or thought. Add a reason if useful. Saving and an optional follow-up are committed together. Open a saved link to see whether its source details are queued, ready, or unavailable, and retry there if needed.
 3. Review new captures in **Inbox**, edit their details, add tags, or attach a project. Your changes survive refreshes and restarts.
 4. Search in **Library** or ask a question in **Ask AI**. Without a provider, answers show matching saved excerpts and real source cards.
 5. Create an optional task or follow-up. Mark done, snooze, or dismiss it from **Tasks & reminders**.
@@ -44,7 +44,7 @@ The real workspace starts empty. Tests use separate temporary databases and vaul
 - Persistent library with full-text and topic matching, optional semantic retrieval, grid/list views, favorites, status/type/tag/project/date filters, saved searches, sorting, incremental display, bulk keep/archive/delete, detail editing, source links and activity.
 - Persistent conversations, source citations and retrieval explanations, scoped search, copy, feedback, retry, honest no-match and provider-failure responses.
 - Provider-independent OpenAI-compatible/Ollama adapter, server-only credentials, explicit consent, reviewable title/summary/tag suggestions, chunk hashes, incremental embeddings and hybrid scoring.
-- Lightweight projects with goals, descriptions, connected resources and task progress. Task CRUD, priorities, due dates, and linked resources. Weekly calendar.
+- Lightweight projects with goals, descriptions, connected resources and task progress. Opening or saving a project automatically shows up to three suggested links from your library. Add a specific goal or description to improve the matches. Task CRUD, priorities, due dates, linked resources, and weekly calendar.
 - Durable reminder schedules, daily/weekly recurrence, explicit time zones, DST handling, snooze, completion, dismissal, quiet hours, per-day limits and notification history. Completion of a saved resource resolves linked reminders and tasks.
 - In-app notification delivery while the browser is closed, through the running companion. Optional desktop alerts while the app is open, after browser permission.
 - Permissioned read-only Obsidian companion; folder rules, frontmatter/tags/wikilinks, incremental imports, rename detection, changed/deleted files, conflict preservation/resolution, direct `obsidian://` links and sync logs.
@@ -75,7 +75,7 @@ AI_EMBEDDING_MODEL=an-installed-embedding-model
 
 Start/install models separately in Ollama. Restart Memnivo after changing environment values. Open **Settings → AI providers**, enable consent, save preferences, and test the connection. Use **Memory & retrieval → Re-index** to queue embeddings for existing items. Leave `AI_EMBEDDING_MODEL` blank to use lexical retrieval with generated answers only.
 
-With consent enabled, selected non-private source snippets and the current question can be sent to the provider. Enrichment sends up to 18,000 characters per item; embedding sends bounded chunks. Private items are excluded from those requests. A vault connection alone does not enable provider access. Conversation history is kept locally and is not automatically sent to the provider. Treat the provider's retention policy as a separate choice.
+With consent enabled, selected non-private source snippets and the current question can be sent to the provider. Casual greetings and unfinished-work questions run locally. Enrichment sends up to 18,000 characters per item; embedding sends bounded chunks. Private items are excluded from those requests. A vault connection alone does not enable provider access. Conversation history is kept locally and is not automatically sent to the provider. Treat the provider's retention policy as a separate choice.
 
 ## Connect a real Obsidian vault
 
@@ -87,13 +87,13 @@ npm run vault -- status
 npm run vault -- sync
 ```
 
-The selected directory must have an `.obsidian` directory. Folder rules use vault-relative names, not full paths. Omit `--include` to index all eligible Markdown; `Private` is excluded by default. Hidden directories, symlinks and non-Markdown files are skipped. Each note has a 1 MB limit; scanning is capped at 5,000 notes.
+The selected directory must have an `.obsidian` directory. Folder rules use vault-relative names, not full paths. Omit `--include` to index all eligible Markdown; `Private` is excluded by default. Hidden directories, symlinks and non-Markdown files are skipped. Each note is limited to 250,000 characters and 1 MB on disk; scanning is capped at 5,000 notes.
 
 The worker synchronizes every minute while Memnivo runs. **Obsidian vault** shows actual state, errors, counters, rules, and a manual sync action. Wikilinks and attachment references remain raw Markdown; attachments themselves are not copied. Imported content is displayed as escaped text, not executable HTML.
 
 Stable frontmatter `id` or `uid` values help identify notes across simultaneous edits and renames. Unchanged-content hashes provide a fallback. Ambiguous renames are reported. Source deletion archives the corresponding unedited imported copy; an independently edited copy is preserved as a conflict. If source and local content both change, open the item and choose **Use vault version** or **Keep my copy & detach**. Neither option writes a source file. Locally deleting/detaching an imported item suppresses reimport of that tracked source.
 
-Changing folder exclusions stops future reading of those files. It does **not** erase previously imported copies; delete those explicitly if needed. Disconnecting keeps imported copies. Connect another vault after disconnecting:
+Changing folder exclusions stops future reads of those files. Earlier copies remain available in Memnivo. Disconnecting also keeps imported copies. Delete those copies in the library if you want to remove them. Connect another vault after disconnecting:
 
 ```powershell
 npm run vault -- disconnect
@@ -114,6 +114,28 @@ Recurring schedules preserve their wall-clock time across DST; nonexistent sprin
 This is a local single-owner application, not a public SaaS authentication system. It binds to `127.0.0.1`; do not put it behind a public proxy or remove host/origin checks. Anyone with access to your unlocked operating-system account can access the workspace. The database is not encrypted at rest; use your operating system's disk protection. Raw vault root paths and secrets are not returned by API exports. Generic production errors avoid displaying stack traces or secret provider responses.
 
 **Delete all my data** clears the database records, checkpoints the WAL, and compacts the database. Original vault/source files and `.env.local` are untouched. Deleting one item removes its chunks, source citations and linked reminders; independent conversation text can still refer to past discussions until the conversation is deleted. SQLite logical deletion is not a forensic erasure guarantee for SSDs, filesystem snapshots, or external backups.
+
+## Back up and restore a workspace
+
+Use **Settings → Privacy & data → Export my data** for portable JSON. **Library → Import** can bring the saved items back from that export. The item importer clears project assignments and skips duplicates. It does not restore projects, tasks, reminders, conversations, settings, or vault connections.
+
+To back up everything in the local workspace, stop both the app and companion with Ctrl+C and wait for them to exit. Close any separate worker or vault sync command. Then copy the entire data folder, including any SQLite WAL files and the session key, to a new backup directory. Substitute your own data directory if you configured `MEMNIVO_DATA_DIR`.
+
+```powershell
+$backup = Join-Path $env:USERPROFILE ("Memnivo-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+Copy-Item -LiteralPath .data -Destination $backup -Recurse -ErrorAction Stop
+```
+
+To check or restore the backup, copy it to a fresh directory and launch Memnivo with that copy. The current data directory and backup remain available. Run these commands from the Memnivo folder after stopping the app and companion.
+
+```powershell
+$restored = Join-Path $env:USERPROFILE ("Memnivo-restored-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+Copy-Item -LiteralPath $backup -Destination $restored -Recurse -ErrorAction Stop
+$env:MEMNIVO_DATA_DIR = $restored
+npm start
+```
+
+Set `$backup` to the absolute path of your backup if you opened a new terminal. Open the workspace and check your project, reminders, and a cited answer. To return to the default `.data` workspace, stop the restored instance and open a fresh terminal without the override. Keep your `.env.local` credentials and original Obsidian vault backed up separately. A restored vault connection still points to the original folder path on disk.
 
 ## Architecture and layout
 
@@ -143,8 +165,8 @@ npm run build       # type-checked production assets and server build
 
 ## Current limits
 
-- Live AI and external metadata calls require working outbound networking and your provider configuration. They were not tested against a paid/live provider in the build environment. Controlled embedding and provider-response tests cover the integration boundaries.
-- Automated UI browser control failed in this environment, so visual polish, real keyboard interaction, responsive overflow and browser-console behavior have not been verified in a live browser. All nine route views have server-rendering checks; those do not replace browser QA.
+- Live Ollama, webpage extraction, GitHub README extraction, and YouTube metadata were tested with public or disposable examples. Network errors can still prevent an individual source from being fetched.
+- Desktop Chrome verified the core save → find → act journey. All nine destinations were also tested at 390 px. Release signoff still depends on real use and pilot feedback.
 - Vault sync was tested against real Markdown files in an isolated vault fixture, including change, rename, deletion and conflict handling. Your own vault and an installed Obsidian application must still be connected and verified by you.
 - No cloud account, multi-device sync, Obsidian write-back, browser extension, automatic video transcripts, PDF/DOCX binary extraction, or executable code ingestion. Document references and UTF-8 Markdown/text imports work. YouTube descriptions/summaries explicitly distinguish metadata from transcript content.
 - Local library snapshots/retrieval cover the latest 1,000 items; search uses up to 10,000 stored vector chunks. Exports include all saved items. Graph rendering is capped at 120 visible nodes. This is intended for a coherent local MVP, not a large hosted organization.
