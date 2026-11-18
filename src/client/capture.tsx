@@ -16,9 +16,10 @@ interface CaptureValues {
     sensitivity: 'normal' | 'private';
     type: ItemType | 'auto';
 }
-export function Capture({ open, onClose }: {
+export function Capture({ open, onClose, linkOnly = false }: {
     open: boolean;
     onClose: () => void;
+    linkOnly?: boolean;
 }) {
     const { data, refresh, notify, openItem } = useWorkspace();
     const { register, handleSubmit, watch, reset, setValue, formState: { errors, isSubmitting } } = useForm<CaptureValues>({ defaultValues: { input: '', title: '', reason: '', tags: '', projectId: '', due: '', sensitivity: 'normal', type: 'auto' } });
@@ -37,11 +38,11 @@ export function Capture({ open, onClose }: {
         setDuplicate(null);
         try {
             const url = normalizeUrl(v.input);
-            if (/^https?:/i.test(v.input.trim()) && !url)
-                throw new Error('This URL is invalid. Check the address.');
+            if (!url && (linkOnly || /^https?:/i.test(v.input.trim())))
+                throw new Error('Enter a valid website link that starts with http:// or https://.');
             const followUp = v.due ? { dueAt: isoInput(v.due), timezone: data.preferences.timezone } : undefined;
-            await api<Item>('items', 'POST', { title: v.title.trim() || titleFrom(v.input), type: v.type === 'auto' ? classify(v.input) : v.type, url, content: url ? '' : v.input, source: url ? new URL(url).hostname : 'Personal note', reason: v.reason, tags: normalizeTags(v.tags), projectId: v.projectId || null, sensitivity: v.sensitivity, followUp });
-            notify(v.due ? 'Saved with a follow-up.' : 'Saved to your inbox.');
+            await api<Item>('items', 'POST', { title: v.title.trim() || titleFrom(v.input), type: v.type === 'auto' ? classify(v.input) : v.type, url, content: url ? '' : v.input, source: url ? new URL(url).hostname : 'Personal note', reason: v.reason, tags: normalizeTags(v.tags), projectId: v.projectId || null, sensitivity: v.sensitivity, followUp, status: linkOnly ? 'saved' : 'inbox' });
+            notify(linkOnly ? 'Link saved.' : v.due ? 'Saved with a follow-up.' : 'Saved to your inbox.');
             onClose();
             void refresh().catch(() => notify('Item saved. Reload the workspace to see it.'));
         }
@@ -51,6 +52,22 @@ export function Capture({ open, onClose }: {
                 setDuplicate(e.detail.itemId);
         }
     });
+    if (linkOnly) {
+        return <Modal open={open} onOpenChange={value => !value && onClose()} title="Quick save" description="Save a website or repository for your projects.">
+            <form onSubmit={save}>
+                <Field label="Link"><input autoFocus required type="url" maxLength={4096} placeholder="https://" {...register('input')}/></Field>
+                <Field label="Note (optional)"><textarea rows={2} maxLength={5000} {...register('reason')}/></Field>
+                <label className="quick-save-private"><input type="checkbox" checked={watch('sensitivity') === 'private'}
+                    onChange={e => setValue('sensitivity', e.target.checked ? 'private' : 'normal')}/> Private link, skip source lookup</label>
+                <ErrorNotice message={error}/>
+                {duplicate ? <Button type="button" onClick={() => { onClose(); openItem(duplicate); }}>Open existing link</Button> : null}
+                <div className="modal-footer">
+                    <Button type="button" onClick={onClose}>Cancel</Button>
+                    <Button type="submit" variant="primary" busy={isSubmitting}>Save link</Button>
+                </div>
+            </form>
+        </Modal>;
+    }
     return <Modal open={open} onOpenChange={v => !v && onClose()} title="Quick capture" description="Save the thought. Make sense of it when you are ready." wide><form onSubmit={save}><div className="capture-input"><textarea autoFocus aria-label="Link, note, or idea" placeholder="Paste a link, write a note, or save an idea…" {...register('input', { required: 'Add a link or a note first.', maxLength: { value: 250000, message: 'Keep captures under 250,000 characters.' } })}/><div><span className="type-detected"><TypeIcon type={type} size={15}/>{type} detected</span><button type="button" className="text-button" onClick={async () => {
             try {
                 setValue('input', await navigator.clipboard.readText());

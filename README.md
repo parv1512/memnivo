@@ -1,6 +1,6 @@
 # Memnivo
 
-A local-first personal memory workspace: capture links and notes, find them through cited conversational retrieval, connect an Obsidian vault, and follow through with durable reminders.
+A local-first workspace that brings useful saved links back when you open a project.
 
 Memnivo 1.0 RC 1 is a single-owner local workspace with SQLite persistence and a separate companion process. There is no demo data in the real workspace.
 
@@ -29,17 +29,18 @@ No PostgreSQL server, cloud account, AI subscription, or Obsidian plugin is need
 
 ## First use
 
-1. Complete the short onboarding and enter your display name.
-2. Use **Quick capture** or **Ctrl+Shift+N** to save a URL or thought. Add a reason if useful. Saving and an optional follow-up are committed together. Open a saved link to see whether its source details are queued, ready, or unavailable, and retry there if needed.
-3. Review new captures in **Inbox**, edit their details, add tags, or attach a project. Your changes survive refreshes and restarts.
-4. Search in **Library** or ask a question in **Ask AI**. Without a provider, answers show matching saved excerpts and real source cards.
-5. Create an optional task or follow-up. Mark done, snooze, or dismiss it from **Tasks & reminders**.
+1. Create a project with a specific goal in **Projects**.
+2. Use **Quick save** or **Ctrl+Shift+N** to save a website or repository. An optional note adds searchable context.
+3. Open the project to see suggested resources. Open a suggestion to inspect its source or attach it to the project.
+4. Open **Saved links** to search, open, and edit links. Press **Ctrl+K** to focus its search.
+
+The settings gear opens workspace settings. Existing full views remain reachable by local paths including `/library`, `/inbox`, `/ask`, `/tasks`, `/graph`, `/vault`, and `/home`.
 
 The real workspace starts empty. Tests use separate temporary databases and vault fixtures.
 
 ## Implemented
 
-- Responsive application shell and nine distinct destinations, collapsible desktop navigation, light/dark/system themes, configurable product name, onboarding, keyboard shortcuts, loading/errors/empty states.
+- Responsive Projects and Saved links navigation, a Quick save shortcut, light/dark/system themes, configurable product name, onboarding, and clear loading and error states.
 - URL and Markdown/plain-text capture; note, video, repository, article, context, document, and code types; reason, tags, sensitivity, project and optional follow-up; canonical-link deduplication.
 - Persistent library with full-text and topic matching, optional semantic retrieval, grid/list views, favorites, status/type/tag/project/date filters, saved searches, sorting, incremental display, bulk keep/archive/delete, detail editing, source links and activity.
 - Persistent conversations, source citations and retrieval explanations, scoped search, copy, feedback, retry, honest no-match and provider-failure responses.

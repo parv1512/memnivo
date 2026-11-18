@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, ArrowUpRight, Search, Plus, Sparkles, Clock, Check, ChevronRight, FolderKanban, GitFork, Play, FileText, LayoutGrid, List, SlidersHorizontal, Archive, Trash2, Star, Bookmark, Inbox as InboxIcon, CheckCheck, BrainCircuit, Database, ArrowDownToLine } from 'lucide-react';
 import { useWorkspace } from './context';
-import { Button, ItemCard, ItemRow, Empty, SectionHead, Status, Tag, ErrorNotice } from './ui';
+import { Button, ItemCard, ItemRow, Empty, SectionHead, Status, Tag, ErrorNotice, TypeIcon } from './ui';
 import { api, humanDate, errorMessage } from './api';
-import { queryTokens, dayInZone } from '../lib/core';
+import { queryTokens, dayInZone, sourceDetails } from '../lib/core';
 import type { Item } from '../lib/types';
 export function HomeView() {
     const { data, capture, ask, navigate, openItem, notify, refresh } = useWorkspace();
@@ -26,6 +26,42 @@ export function HomeView() {
                 }
             }}><Check size={15}/></button><div><strong>{r.title}</strong><small>{new Date(r.snoozedUntil || r.dueAt) < date ? 'Due' : 'Today'} · {humanDate(r.snoozedUntil || r.dueAt, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</small></div><span className="status upcoming"><span />Follow-up</span></div>) : <div className="attention-clear"><span><CheckCheck size={24}/></span><div><h3>You have room to focus.</h3><p>No follow-ups need your attention today.</p></div></div>}</div></div><div><SectionHead title="In motion" aside={<button className="text-button" onClick={() => navigate('/projects')}>Projects <ArrowUpRight size={13}/></button>}/>{data.projects.filter(p => p.status === 'active').length ? <div className="project-mini-list">{data.projects.filter(p => p.status === 'active').slice(0, 2).map((p, i) => <button key={p.id} onClick={() => navigate(`/projects?project=${p.id}`)}><span className={`project-dot color-${i % 4}`}/><div><strong>{p.name}</strong><small>{p.itemCount} resources · {p.completedCount}/{p.taskCount} tasks done</small></div><ChevronRight size={16}/></button>)}</div> : <button className="project-start" onClick={() => navigate('/projects')}><span><FolderKanban size={21}/></span><div><strong>Give your next idea a home</strong><small>Bring resources and next steps together.</small></div><Plus size={16}/></button>}</div></div><SectionHead title="Recently captured" aside={<button className="text-button" onClick={() => navigate('/library')}>Open library <ArrowRight size={14}/></button>}/>{active.length ? <div className="item-grid home-grid">{active.slice(0, 6).map(item => <ItemCard key={item.id} item={item} onOpen={() => openItem(item)}/>)}</div> : <div className="first-capture"><div className="capture-stack" aria-hidden="true"><span><FileText size={20}/></span><span><GitFork size={22}/></span><span><Play size={20}/></span></div><div><h3>Keep the interesting things.</h3><p>A useful link. A half-formed idea. The thing you’ll need later.<br />Start with one capture, and let your memory grow.</p><Button variant="primary" onClick={capture}><Plus size={16}/> Capture your first thought</Button></div><span className="capture-shortcut"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd><small>whenever inspiration strikes</small></span></div>}{ongoing.length ? <><SectionHead title="Pick up where you left off"/><div className="surface">{ongoing.slice(0, 3).map(i => <ItemRow key={i.id} item={i} onOpen={() => openItem(i)}/>)}</div></> : null}<div className="home-bottom-note"><Database size={15}/><span>{data.vault ? `${data.vault.noteCount} notes connected from ${data.vault.name}. Last sync ${data.vault.lastSync ? humanDate(data.vault.lastSync, { hour: 'numeric', minute: '2-digit' }) : 'not yet'}.` : 'Your Obsidian notes can be part of the picture, too.'}</span><button className="text-button" onClick={() => navigate('/vault')}>{data.vault ? 'View vault' : 'Connect a vault'} <ArrowRight size={13}/></button></div></>;
 }
+export function SavedLinksView({ queryString }: { queryString: string }) {
+    const { data, openItem } = useWorkspace();
+    const params = new URLSearchParams(queryString);
+    const [query, setQuery] = useState(params.get('q') || '');
+    const [limit, setLimit] = useState(30);
+    const links = data.items.filter((item): item is Item & { url: string } => !!item.url && item.status !== 'archived');
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const visible = terms.length ? links.filter(item => {
+        const text = [item.title, item.url, item.summary, item.note, item.reason, sourceDetails(item), item.tags.join(' '), item.content].join('\n').toLowerCase();
+        return terms.every(term => text.includes(term));
+    }) : links;
+    return <>
+        <div className="page-heading"><h1>Saved links</h1></div>
+        <label className="saved-links-search">
+            <Search size={17} aria-hidden="true"/>
+            <input id="saved-links-search" type="search" aria-label="Search saved links" placeholder="Search saved links" maxLength={1000}
+                autoFocus={params.has('focus')} value={query} onChange={e => { setQuery(e.target.value); setLimit(30); }}/>
+        </label>
+        {visible.length ? <ul className="surface saved-link-list">
+            {visible.slice(0, limit).map(item => {
+                const description = item.reason || item.summary || sourceDetails(item);
+                return <li className="item-row" key={item.id}>
+                    <button className="row-main" onClick={() => openItem(item)}>
+                        <TypeIcon type={item.type}/>
+                        <span><strong>{item.title}</strong><small>{new URL(item.url).hostname}{description ? ` · ${description}` : ''}</small></span>
+                    </button>
+                    <a className="icon-button" href={item.url} target="_blank" rel="noreferrer" aria-label={`Open website for ${item.title}`}><ArrowUpRight size={16}/></a>
+                </li>;
+            })}
+        </ul> : <Empty icon={terms.length ? 'search' : 'capture'}
+            title={terms.length ? 'No matching links' : 'No saved links yet'}
+            description={terms.length ? 'Try a title, a website name, or a topic.' : 'Use Quick save to add a website or GitHub repository.'}/>}
+        {visible.length > limit ? <div className="load-more"><Button onClick={() => setLimit(limit + 30)}>Show more links</Button></div> : null}
+    </>;
+}
+
 export function LibraryView({ inbox, queryString }: {
     inbox: boolean;
     queryString: string;
