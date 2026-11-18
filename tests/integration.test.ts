@@ -264,18 +264,71 @@ test('attaching a strong suggestion leaves weaker links out and safely handles r
     await attach(otherPath, project.id);
     assert.equal(getItem(best.id).projectId, other.id);
 });
-test('project suggestions ignore generic action words without AI', async () => {
-    const project = saveProject({ name: 'Research', goal: 'Finding a new startup idea' })!;
-    const link = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', summary: 'Browse startup ideas and market research.' }, { enrich: false });
+test('specific saved links match a detailed project goal without AI', async () => {
+    const project = saveProject({ name: 'Startup research', goal: 'Finding a new startup idea', description: 'Compare industries, look at competitors, and validate the ideas.' })!;
+    const link = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', reason: 'Browse startup ideas.', tags: ['startup-idea'] }, { enrich: false });
+    const distractor = createItem({ title: 'Email templates', type: 'article', url: 'https://example.test/email', content: 'Compare industries, interview competitors, validate your startup idea.' }, { enrich: false });
+    metadata(distractor.id, { contentImported: true, description: 'Signatures for email.' });
     const { links } = await suggestProjectLinks(project);
     assert.deepEqual(links.map(suggestion => [suggestion.itemId, suggestion.evidence]), [[link.id, 'topics']]);
+});
+
+test('a new project can surface links for different parts of its goal', async () => {
+    const repair = createItem({ title: 'Free repair manual', type: 'article', url: 'https://example.test/repairs', content: 'Detailed repair instructions for hardware. Browse our collection.' }, { enrich: false });
+    metadata(repair.id, { contentImported: true, description: 'Learn how to fix devices.' });
+    const hiring = createItem({ title: 'Recruiting platform', type: 'article', url: 'https://example.test/recruiting', reason: 'For hiring people.' }, { enrich: false });
+    const noise = createItem({ title: 'Voice synthesis demo', type: 'repository', url: 'https://example.test/audio-demo', content: 'Hardware requirements. Get support for the app. Built by creative people.' }, { enrich: false });
+    metadata(noise.id, { contentImported: true, description: 'A neural speech synthesizer.' });
+
+    const origin = 'http://127.0.0.1:3000';
+    const headers = { origin, host: '127.0.0.1:3000', cookie: `memnivo_session=${issueSession()}` };
+    const { body } = await api(new Request(`${origin}/api/projects`, { method: 'POST', headers }), {
+        name: 'Fix-anything agency', goal: 'Fixing agency', description: 'Fix hardware problems, provide a support app for workers, and start hiring people.',
+    });
+    const project = body as { id: string };
+    const result = await api(new Request(`${origin}/api/projects/${project.id}/suggestions`, { headers }), undefined);
+    const links = (result.body as ProjectSuggestions).links;
+    assert.deepEqual(new Set(links.map(link => link.itemId)), new Set([repair.id, hiring.id]));
+    assert.match(links.find(link => link.itemId === repair.id)?.excerpt ?? '', /repair instructions for hardware/);
+
+    metadata(hiring.id, { description: 'An AI agent for hiring people.' });
+    const voice = saveProject({ name: 'Voice demo', goal: 'Build an AI agent for speech synthesis' })!;
+    assert.deepEqual((await suggestProjectLinks(voice)).links, []);
+});
+
+test('link embeddings are available even when optional AI enrichment fails', async () => {
+    const item = createItem({ title: 'Field repair handbook', type: 'article', url: 'https://example.test/field-repair' }, { enrich: false });
+    const names = ['AI_PROVIDER', 'AI_BASE_URL', 'AI_MODEL', 'AI_EMBEDDING_MODEL'];
+    const originalEnv = names.map(name => [name, process.env[name]] as const);
+    const originalFetch = globalThis.fetch;
+    Object.assign(process.env, { AI_PROVIDER: 'ollama', AI_BASE_URL: 'http://127.0.0.1:11434/v1', AI_MODEL: 'unavailable-chat', AI_EMBEDDING_MODEL: 'fixture-embedding' });
+    setPreferences({ ...preferences(), aiConsent: true });
+    globalThis.fetch = async url => {
+        if (String(url).endsWith('/embeddings'))
+            return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }));
+        return new Response(null, { status: 503 });
+    };
+    try {
+        await assert.rejects(enrichItem(item.id, async () => ({ extractedText: 'Replace the worn drive with a spare.' })), /HTTP 503/);
+        assert.equal(one<{ model: string }>('SELECT model FROM embedding_chunks WHERE item_id=?', item.id)?.model, 'ollama:fixture-embedding');
+        assert.equal(typeof getItem(item.id).metadata.embeddedAt, 'string');
+    }
+    finally {
+        globalThis.fetch = originalFetch;
+        for (const [name, value] of originalEnv) {
+            if (value === undefined)
+                delete process.env[name];
+            else
+                process.env[name] = value;
+        }
+    }
 });
 
 test('local Ollama matches by meaning, attachments boost related projects, and dismissals stay scoped', async () => {
     const initial = saveProject({ name: 'Discovery', goal: 'Find a new startup idea' })!;
     const similar = saveProject({ name: 'Planning', goal: 'Validate a business opportunity' })!;
     const separate = saveProject({ name: 'Router', goal: 'Configure a packet network' })!;
-    const idea = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', content: 'Discover business opportunities and market gaps.' }, { enrich: false });
+    const idea = createItem({ title: 'IdeaBrowser', type: 'article', url: 'https://ideabrowser.com/', content: 'Discover market gaps for entrepreneurs.' }, { enrich: false });
     const reference = createItem({ title: 'Market notes', type: 'article', url: 'https://example.test/market', content: 'Explore promising opportunities.' }, { enrich: false });
     const privateLink = createItem({ title: 'Private notes', type: 'article', url: 'https://example.test/private', content: 'Private fixture', sensitivity: 'private' }, { enrich: false });
     const model = 'project-feedback-fixture';
@@ -300,7 +353,7 @@ test('local Ollama matches by meaning, attachments boost related projects, and d
         const before = await suggestProjectLinks(similar);
         assert.deepEqual(before.links.map(link => link.itemId), [reference.id, idea.id]);
         assert.equal(before.links[1].evidence, 'semantic');
-        assert.match(before.links[1].excerpt ?? '', /business opportunities/);
+        assert.match(before.links[1].excerpt ?? '', /market gaps/);
 
         // The ordinary attachment path stores the goal. A later move or detach keeps that example.
         updateItem(idea.id, { projectId: initial.id });

@@ -71,9 +71,17 @@ export async function embedItem(id: string) {
             return;
         const batch = chunks.slice(i, i + 10), vectors = await provider.embed(batch.map(c => c.text));
         transaction(() => {
-            if (getItem(id).sensitivity === 'private' || !preferences().aiConsent)
+            const current = getItem(id);
+            if (current.sensitivity === 'private' || !preferences().aiConsent)
                 return;
-            batch.forEach((c, n) => run('UPDATE embedding_chunks SET embedding=?,model=? WHERE id=? AND content_hash=?', JSON.stringify(vectors[n]), `${config.provider}:${config.embeddingModel}`, c.id, c.content_hash));
+            let updated = false;
+            for (const [n, chunk] of batch.entries()) {
+                const result = run('UPDATE embedding_chunks SET embedding=?,model=? WHERE id=? AND content_hash=?', JSON.stringify(vectors[n]), `${config.provider}:${config.embeddingModel}`, chunk.id, chunk.content_hash);
+                if (result.changes)
+                    updated = true;
+            }
+            if (updated && current.url)
+                metadata(id, { ...current.metadata, embeddedAt: now() });
         });
     }
 }
@@ -165,6 +173,8 @@ export async function enrichItem(id: string, loadSource = extractMetadata) {
             return;
         item = refreshed;
     }
+    // Use the saved source for retrieval even if the optional chat model fails.
+    await embedItem(id);
     const provider = aiProvider();
     if (provider) {
         const text = `Title: ${item.title}\nReason: ${item.reason}\nContent basis: ${savedContentBasis(item)}\nSource details: ${sourceDetails(item).slice(0, 2000)}\nSaved content: ${item.content.slice(0, 18000)}`;
@@ -177,5 +187,4 @@ export async function enrichItem(id: string, loadSource = extractMetadata) {
                 metadata(id, { ...current.metadata, aiSuggestions: suggestions, suggestionsAt: now(), suggestionsModel: providerStatus().model });
         });
     }
-    await embedItem(id);
 }

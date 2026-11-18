@@ -50,15 +50,15 @@ function topicWords(text: string): string[] {
     });
 }
 
-function questionTopics(text: string): string[] {
-    return [...new Set(topicWords(text).filter(word => word.length > 1 && !QUESTION_WORDS.has(word)))].slice(0, 32);
+function questionTopics(text: string, wordsIn = topicWords): string[] {
+    return [...new Set(wordsIn(text).filter(word => word.length > 1 && !QUESTION_WORDS.has(word)))].slice(0, 32);
 }
 
-function scoreFocusedItem(item: Item, topics: string[], query: string) {
-    const title = new Set(topicWords(`${item.title} ${item.url || ''} ${item.tags.join(' ')}`));
-    const source = new Set(topicWords(`${item.summary}\n${item.reason}\n${item.note}\n${sourceDetails(item)}\n${item.content}`));
+function scoreFocusedItem(item: Item, topics: string[], query: string, wordsIn = topicWords) {
+    const title = new Set(wordsIn(`${item.title} ${item.url || ''} ${item.tags.join(' ')}`));
+    const source = new Set(wordsIn(`${item.summary}\n${item.reason}\n${item.note}\n${sourceDetails(item)}\n${item.content}`));
     const matchedTopics = topics.filter(topic => title.has(topic) || source.has(topic));
-    const titleTopics = questionTopics(item.title);
+    const titleTopics = questionTopics(item.title, wordsIn);
     const exact = [item.title, item.url].some(value => value?.toLowerCase() === query.trim().toLowerCase())
         || (topics.length > 0 && titleTopics.join(' ') === topics.join(' '));
     const score = matchedTopics.reduce((sum, topic) => sum + (title.has(topic) ? 5 : 2), 0) + (exact ? 18 : 0);
@@ -70,21 +70,28 @@ function compareFocusedItems(a: ReturnType<typeof scoreFocusedItem>, b: ReturnTy
     return Number(b.exact) - Number(a.exact) || b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt) || a.item.id.localeCompare(b.item.id);
 }
 
-function focusedExcerpt(item: Item, topics: string[]): string {
+function focusedExcerpt(item: Item, topics: string[], options: {
+    wordsIn?: typeof topicWords;
+    sourceTopics?: ReadonlySet<string>;
+    broadTopics?: ReadonlySet<string>;
+} = {}): string {
+    const { wordsIn = topicWords, sourceTopics, broadTopics } = options;
     const passages = [item.summary, sourceDetails(item), item.note, item.reason, item.content];
-    let excerpt = passages.find(text => text.trim()) || item.title;
+    let excerpt = sourceTopics ? item.title : passages.find(text => text.trim()) || item.title;
     let best = 0;
     // Look across the saved text so an introductory paragraph doesn't bury the relevant passage.
     for (const text of passages) {
         for (const passage of text.split(/\n+|(?<=[.!?])\s+/)) {
-            const passageWords = new Set(topicWords(passage));
-            const matches = topics.filter(topic => passageWords.has(topic)).length;
-            if (matches > best) {
+            const passageWords = new Set(wordsIn(passage));
+            const matches = topics.filter(topic => passageWords.has(topic));
+            const specific = matches.filter(topic => !broadTopics?.has(topic)).length;
+            const score = matches.length + specific / (topics.length + 1);
+            if (score > best && (!sourceTopics || matches.some(topic => sourceTopics.has(topic)))) {
                 excerpt = passage;
-                best = matches;
+                best = score;
             }
         }
-        if (best === topics.length)
+        if (best >= topics.length)
             break;
     }
     return snippet(excerpt.trim(), topics, 280);
@@ -210,9 +217,31 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<S
     return results.filter(r => !query.trim() || r.score > 0).sort((a, b) => b.score - a.score || b.item.createdAt.localeCompare(a.item.createdAt)).slice(0, opts.limit || 30);
 }
 
-const PROJECT_ACTION_WORDS = new Set(['finding', 'explore', 'exploring', 'discover', 'discovering', 'identify', 'identifying']);
+const PROJECT_FILLER_WORDS = new Set(['also', 'them', 'starting', 'finding', 'explore', 'exploring', 'discover', 'discovering', 'identify', 'identifying']);
+const BROAD_PROJECT_TOPICS = new Set(['ai', 'agent', 'app', 'people', 'support', 'agency', 'system', 'software']);
+function projectTopicWords(text: string): string[] {
+    return topicWords(text).map(word => /^(?:fix(?:es|ed|ing)?|repair(?:ed|ing)?)$/.test(word) ? 'repair' : word);
+}
 function projectTopics(text: string): string[] {
-    return questionTopics(text).filter(word => !PROJECT_ACTION_WORDS.has(word));
+    return questionTopics(text, projectTopicWords).filter(word => !PROJECT_FILLER_WORDS.has(word));
+}
+function projectLinkEvidence(item: Item, topics: string[]) {
+    const candidate = scoreFocusedItem(item, topics, '', projectTopicWords);
+    const title = new Set(projectTopicWords(`${item.title} ${item.tags.join(' ')}`));
+    const context = projectTopicWords([item.summary, item.reason, item.note, sourceDetails(item)].join('\n'));
+    // Downloaded page text can contain unrelated sections. Require a matching topic in the source details or saved context.
+    const sourceTopics = item.metadata.contentImported ? new Set([...title, ...context]) : undefined;
+    const excerpt = candidate.exact || candidate.matchedTopics.length >= 2
+        ? focusedExcerpt(item, candidate.matchedTopics, { wordsIn: projectTopicWords, sourceTopics, broadTopics: BROAD_PROJECT_TOPICS }) : '';
+    const excerptWords = new Set(projectTopicWords(excerpt));
+    const usefulTopics = (words: Set<string>) => {
+        const shared = candidate.matchedTopics.filter(topic => words.has(topic));
+        return shared.some(topic => !BROAD_PROJECT_TOPICS.has(topic)) ? shared : [];
+    };
+    const titleTopics = usefulTopics(title);
+    const excerptTopics = usefulTopics(excerptWords);
+    const keywordTopics = excerptTopics.length > titleTopics.length ? excerptTopics : titleTopics;
+    return { ...candidate, keywordTopics, excerpt, excerptTopics };
 }
 
 type ProjectAttachment = { item_id: string; context: string };
@@ -296,7 +325,7 @@ export async function suggestProjectLinks(project: Project): Promise<ProjectSugg
 
     const context = projectFeedbackContext(project);
     const candidates = listItems().filter(item => item.url && item.status !== 'archived')
-        .map(item => scoreFocusedItem(item, topics, ''));
+        .map(item => projectLinkEvidence(item, topics));
     if (!candidates.length)
         return { needsContext: topics.length === 1, links: [] };
 
@@ -317,36 +346,28 @@ export async function suggestProjectLinks(project: Project): Promise<ProjectSugg
             learned.set(past.item_id, similarity);
     }
 
-    // Keep the quality bar stable when a good match is attached or dismissed.
-    const bestCoverage = Math.max(...candidates.map(candidate => candidate.matchedTopics.length));
-    const minimumMatches = Math.max(2, Math.min(3, topics.length), Math.ceil(bestCoverage * 0.75));
+    // Use the strongest evidence in the library, including attached or dismissed links, to keep the bar stable.
+    const bestCoverage = Math.max(...candidates.map(candidate => candidate.exact ? topics.length : candidate.keywordTopics.length));
+    const minimumMatches = Math.max(2, Math.ceil(bestCoverage * 2 / 3));
     const bestSimilarity = Math.max(0, ...Array.from(similarLinks.values(), match => match.similarity));
     const meaningCutoff = Math.max(0.72, bestSimilarity - 0.18);
     const ranked: { candidate: typeof candidates[number]; link: ProjectSuggestions['links'][number]; score: number }[] = [];
     for (const candidate of candidates) {
-        const { item, matchedTopics, exact } = candidate;
+        const { item, keywordTopics, excerpt, excerptTopics, exact } = candidate;
         if (!item.url || item.projectId === project.id || dismissed.has(item.id))
             continue;
 
         const match = similarLinks.get(item.id);
         const semanticScore = match && match.similarity >= meaningCutoff ? match.similarity : 0;
         const attachment = learned.get(item.id) ?? 0;
-        if (!exact && matchedTopics.length < minimumMatches && !semanticScore && !attachment)
-            continue;
-
-        const excerpt = focusedExcerpt(item, matchedTopics);
-        const excerptTopics = new Set(topicWords(excerpt));
-        const titleTopics = new Set(topicWords(`${item.title} ${item.url} ${item.tags.join(' ')}`));
-        const excerptMatches = matchedTopics.filter(topic => excerptTopics.has(topic)).length;
-        const titleMatches = matchedTopics.filter(topic => titleTopics.has(topic)).length;
-        const keyword = exact || (matchedTopics.length >= minimumMatches && Math.max(excerptMatches, titleMatches) >= 2);
+        const keyword = exact || keywordTopics.length >= minimumMatches;
         if (!keyword && !semanticScore && !attachment)
             continue;
 
-        const topicScore = exact ? 0.94 : keyword ? 0.72 + 0.16 * matchedTopics.length / topics.length : 0;
+        const topicScore = exact ? 0.94 : keyword ? 0.72 + 0.16 * keywordTopics.length / topics.length : 0;
         const score = Math.max(topicScore, semanticScore, attachment ? 0.7 : 0) + 0.15 * attachment;
         // Excerpts are always actual saved text; the model is only used for similarity.
-        const savedExcerpt = excerpt !== item.title && excerptMatches >= (exact ? 1 : 2) ? excerpt
+        const savedExcerpt = keyword && excerpt !== item.title && excerptTopics.length >= (exact ? 1 : 2) ? excerpt
             : semanticScore && match ? snippet(match.text.trim(), [], 280)
             : attachment ? snippet(item.summary || sourceDetails(item) || item.reason || item.note || item.content, [], 280)
             : null;
@@ -354,7 +375,7 @@ export async function suggestProjectLinks(project: Project): Promise<ProjectSugg
             itemId: item.id,
             title: item.title,
             url: item.url,
-            topics: matchedTopics.slice(0, 4),
+            topics: (exact ? candidate.matchedTopics : keywordTopics).slice(0, 4),
             excerpt: savedExcerpt && savedExcerpt !== item.title ? savedExcerpt : null,
             projectId: item.projectId,
             evidence: attachment ? 'attachment' : keyword ? 'topics' : 'semantic',
